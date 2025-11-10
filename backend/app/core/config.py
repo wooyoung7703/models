@@ -59,5 +59,13 @@ class Settings:
     # How far back (in minutes) to scan and fill forward from if DB empty or gaps exist
     GAP_FILL_LOOKBACK_MINUTES: int = int(os.getenv("GAP_FILL_LOOKBACK_MINUTES", "1440"))  # default 1 day
 
+    # Background tasks controls
+    # Disable long-running background loops (collector/resampler/predictor) for tests or special runs
+    DISABLE_BACKGROUND_LOOPS: bool = os.getenv("DISABLE_BACKGROUND_LOOPS", "0") in {"1", "true", "True"}
+    # Enable/disable periodic prediction task
+    PREDICT_ENABLED: bool = os.getenv("PREDICT_ENABLED", "1") in {"1", "true", "True"}
+    # Prediction tick interval seconds
+    PREDICT_INTERVAL_SECONDS: int = int(os.getenv("PREDICT_INTERVAL_SECONDS", "30"))
+
 
 settings = Settings()

@@ -13,11 +13,15 @@ from .resampler import resample_from_1m, resample_incremental
 from .snapshots import save_feature_state
 from .logging_config import init_logging
 from .snapshots import load_feature_state
+from .predictor import RealTimePredictor
 
 init_logging()
 app = FastAPI(title="Models API", version="0.1.0")
 collector = BinanceCollector()
 _resampler_task = None
+_predict_task = None
+_predictor: RealTimePredictor | None = None
+_predictor_tasks_multi: dict[str, asyncio.Task] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,8 +142,9 @@ async def on_startup():
                     )
     except Exception as e:
         logging.exception("Seeding feature calculators failed: %s", e)
-    # Start collector background process
-    await collector.start()
+    # Start collector background process (unless disabled by env)
+    if not settings.DISABLE_BACKGROUND_LOOPS:
+        await collector.start()
     # Start periodic resampler for 5m/15m
     async def _run_resampler():
         import asyncio
@@ -157,16 +162,53 @@ async def on_startup():
                 logging.exception("Resampler error: %s", e)
             await asyncio.sleep(55)
     global _resampler_task
-    _resampler_task = asyncio.create_task(_run_resampler())
+    if not settings.DISABLE_BACKGROUND_LOOPS:
+        _resampler_task = asyncio.create_task(_run_resampler())
+
+    # Start periodic predictor (every 30s) using latest closed candle
+    async def _run_predictor_for_symbol(sym: str):
+        import asyncio
+        from sqlmodel import select
+        predictor = RealTimePredictor(symbol=sym, interval=settings.INTERVAL)
+        interval = max(5, settings.PREDICT_INTERVAL_SECONDS)
+        while True:
+            try:
+                with Session(engine) as session:
+                    latest = session.exec(
+                        select(Candle).where((Candle.symbol==sym)&(Candle.exchange_type==settings.EXCHANGE_TYPE)&(Candle.interval==settings.INTERVAL))
+                        .order_by(Candle.open_time.desc()).limit(1)
+                    ).first()
+                    if latest:
+                        nc = predictor.predict_from_row(latest)
+                        prev = getattr(app.state, 'latest_nowcast', {})
+                        prev[sym] = nc.to_dict()
+                        app.state.latest_nowcast = prev
+                        logging.info("[nowcast] %s %s price=%.6f bottom_score=%.3f (rsi=%.1f bb%%b=%.2f dd20=%.3f volz=%.2f)",
+                                     sym, settings.INTERVAL, nc.price, nc.bottom_score,
+                                     nc.components.get('rsi_14', 0.0), nc.components.get('bb_pct_b_20_2', 0.0),
+                                     nc.components.get('drawdown_from_max_20', 0.0), nc.components.get('vol_z_20', 0.0))
+            except Exception as e:
+                logging.exception("Predictor loop error [%s]: %s", sym, e)
+            await asyncio.sleep(interval)
+
+    if not settings.DISABLE_BACKGROUND_LOOPS and settings.PREDICT_ENABLED:
+        for sym in settings.SYMBOLS:
+            _predictor_tasks_multi[sym] = asyncio.create_task(_run_predictor_for_symbol(sym))
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await collector.stop()
+    if not settings.DISABLE_BACKGROUND_LOOPS:
+        await collector.stop()
     # Cancel resampler task
     global _resampler_task
     if _resampler_task:
         _resampler_task.cancel()
+    # Cancel predictor task
+    global _predictor_tasks_multi
+    for sym, task in list(_predictor_tasks_multi.items()):
+        task.cancel()
+    _predictor_tasks_multi.clear()
     # Persist latest feature calculator snapshots
     try:
         with Session(engine) as session:
@@ -176,4 +218,17 @@ async def on_shutdown():
         logging.info("Saved feature state snapshots for %d symbols on shutdown", len(collector.features_by_symbol))
     except Exception as e:
         logging.exception("Failed to save snapshots on shutdown: %s", e)
+
+
+@app.get("/nowcast")
+async def nowcast(symbol: str | None = None):
+    """Return latest periodic prediction(s).
+
+    - If symbol provided, returns that symbol's nowcast when available.
+    - Otherwise returns a mapping for all tracked symbols.
+    """
+    data = getattr(app.state, 'latest_nowcast', {})
+    if symbol:
+        return data.get(symbol.lower())
+    return data
 
