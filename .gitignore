@@ -34,10 +34,11 @@ ENV/
 *~
 
 # Models
-models/xgboost/*.json
-models/xgboost/*.pkl
-models/lstm/
-models/transformer/
+models/
+backend/app/models/xgboost/*.json
+backend/app/models/xgboost/*.pkl
+backend/app/models/lstm/
+backend/app/models/transformer/
 
 # Data
 data/
