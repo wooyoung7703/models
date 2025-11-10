@@ -117,6 +117,11 @@ class XGBoostPredictor:
         """
         예측값과 함께 신뢰도 정보 반환
         
+        Note: 현재 구현된 신뢰 구간은 예측값의 표준편차를 기반으로 한 간단한 추정이며,
+        실제 모델의 예측 불확실성을 완전히 반영하지 못합니다.
+        프로덕션 환경에서는 Quantile Regression이나 Conformal Prediction과 같은
+        더 정교한 불확실성 정량화 방법을 사용하는 것을 권장합니다.
+        
         Args:
             features: 예측할 피처들
             return_intervals: True이면 예측 구간도 함께 반환

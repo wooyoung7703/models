@@ -44,8 +44,11 @@ class XGBoostTrainer:
         """
         데이터 전처리 및 훈련/테스트 세트 분리
         
+        Note: 시계열 데이터의 시간 순서를 유지하기 위해 랜덤 셔플을 하지 않습니다.
+        과거 데이터로 훈련하고 미래 데이터로 테스트하는 방식으로 분리됩니다.
+        
         Args:
-            data: 입력 데이터프레임
+            data: 입력 데이터프레임 (시간 순서대로 정렬되어야 함)
             target_column: 예측할 타겟 컬럼명
             feature_columns: 사용할 피처 컬럼 리스트 (None이면 타겟 제외 모든 컬럼)
             test_size: 테스트 세트 비율
@@ -247,7 +250,7 @@ def create_sample_data(n_samples: int = 1000) -> pd.DataFrame:
     data['volatility'] = data['close'].rolling(window=20, min_periods=1).std()
     
     # NaN 제거
-    data = data.fillna(method='bfill')
+    data = data.bfill()
     
     logger.info(f"샘플 데이터 생성 완료: {len(data)} 행, {len(data.columns)} 열")
     
