@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg-info/
+.python-version
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.ipynb_checkpoints/
+
+# VS Code / IDEs
+.vscode/
+.idea/
+*.swp
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage / Reports
+.coverage
+htmlcov/
+coverage.xml
+
+# Misc
+*.bak
+*.tmp

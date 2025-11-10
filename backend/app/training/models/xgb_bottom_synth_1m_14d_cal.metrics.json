@@ -1,0 +1,25 @@
+{
+  "model_out": "backend/app/training/models/xgb_bottom_synth_1m_14d_cal.pkl",
+  "mode": "cls_bottom",
+  "interval": "1m",
+  "n_features": 55,
+  "train_rows": 1600,
+  "val_rows": 400,
+  "metrics": {
+    "default_threshold": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "tp": 0,
+    "fp": 0,
+    "fn": 4,
+    "best_threshold": 0.5,
+    "best_precision": 0.0,
+    "best_recall": 0.0,
+    "best_f1": 0.0,
+    "best_tp": 0,
+    "best_fp": 0,
+    "best_fn": 4
+  },
+  "timestamp_utc": "2025-11-10T09:04:14Z"
+}
