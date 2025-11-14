@@ -126,3 +126,49 @@ class FeatureState(SQLModel, table=True):
             unique=True,
         ),
     )
+
+
+class Trade(SQLModel, table=True):
+    __tablename__ = "trades"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    symbol: str = Field(index=True)
+    exchange_type: str = Field(index=True, default="futures")
+    interval: str = Field(index=True, default="1m")
+    side: str = Field(default="long", index=True)
+    leverage: int = Field(default=10)
+    status: str = Field(default="open", index=True)  # open | closed
+
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    closed_at: Optional[datetime] = Field(default=None, index=True)
+
+    entry_price: float
+    avg_price: float
+    quantity: float = Field(default=0.0)  # total base qty
+
+    max_adds: int = Field(default=1000)  # effectively unlimited adds for stress test
+    adds_done: int = Field(default=0)
+
+    take_profit_pct: float = Field(default=0.01)   # +1%
+    stop_loss_pct: float = Field(default=-0.005)   # -0.5%
+
+    # Trailing TP settings (optional). If tp_mode == 'trailing', use trigger/step/giveback.
+    # Trailing TP runtime state is managed in TradeManager (not persisted in DB)
+
+    last_price: Optional[float] = None
+    pnl_pct_snapshot: Optional[float] = None
+    strategy_json: Optional[str] = None  # store entry condition snapshot
+
+
+class TradeFill(SQLModel, table=True):
+    __tablename__ = "trade_fills"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    trade_id: int = Field(index=True, foreign_key="trades.id")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
+    price: float
+    quantity: float = Field(default=0.0)
+
+    symbol: str = Field(index=True)
+    exchange_type: str = Field(index=True, default="futures")
+    interval: str = Field(index=True, default="1m")

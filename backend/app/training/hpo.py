@@ -2,11 +2,25 @@ import argparse
 import json
 import os
 import tempfile
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 import numpy as np
 import optuna
+
+DEFAULT_BOTTOM_TRAIN_DAYS = int(os.getenv("BOTTOM_TRAIN_DAYS", "14"))
+try:
+    from backend.app.core.config import settings
+except Exception:
+    if '.' not in sys.path:
+        sys.path.append('.')
+    try:
+        from backend.app.core.config import settings  # type: ignore
+    except Exception:
+        settings = None  # type: ignore
+if 'settings' in locals() and settings is not None:
+    DEFAULT_BOTTOM_TRAIN_DAYS = getattr(settings, 'BOTTOM_TRAIN_DAYS', DEFAULT_BOTTOM_TRAIN_DAYS)
 
 # Training imports (reuse existing scripts)
 from backend.app.training.train_lstm import train as train_lstm
@@ -213,7 +227,7 @@ def main():
     p.add_argument('--model', type=str, required=True, choices=['lstm','transformer','xgb'])
     p.add_argument('--mode', type=str, default='cls_bottom', choices=['cls_bottom','reg_next_ret'])
     p.add_argument('--interval', type=str, default='1m')
-    p.add_argument('--days', type=int, default=7)
+    p.add_argument('--days', type=int, default=DEFAULT_BOTTOM_TRAIN_DAYS)
     p.add_argument('--seq-len', type=int, default=30)
     p.add_argument('--val-ratio', type=float, default=0.2)
     p.add_argument('--trials', type=int, default=10)

@@ -1,0 +1,37 @@
+{
+  "timestamp_utc": "2025-11-12T01:11:04Z",
+  "models": [
+    "lstm",
+    "tf",
+    "xgb"
+  ],
+  "metrics": {
+    "precision": 0.2757438336467205,
+    "recall": 0.9570057581573896,
+    "f1": 0.4281298299845441,
+    "auroc": 0.9521660241560448,
+    "auprc": 0.4163667664682751,
+    "logloss": 0.2894884820729972
+  },
+  "metrics_prk": {
+    "precision_at_0p1": 0.4230769230769231,
+    "recall_at_0p1": 0.008445297504798464,
+    "precision_at_0p5": 0.42857142857142855,
+    "recall_at_0p5": 0.042610364683301344,
+    "precision_at_1p0": 0.5338491295938105,
+    "recall_at_1p0": 0.10595009596928982
+  },
+  "metrics_lowvol": {},
+  "metrics_prk_lowvol": {},
+  "best_threshold_precision": 0.9446610169491525,
+  "precision_at_best_t": 0.5359066427289049,
+  "coverage_at_best_t": 0.021534060156189593,
+  "double_t_low": 0.5,
+  "double_t_high": 0.995,
+  "precision_high": 0.0,
+  "precision_low": 0.2757438336467205,
+  "coverage_high": 0.0,
+  "coverage_low": 0.17476610221912936,
+  "folds": 3,
+  "oof_count": 51732
+}

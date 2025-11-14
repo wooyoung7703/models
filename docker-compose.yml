@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: models-backend
+    environment:
+      - LOG_LEVEL=INFO
+      - DISABLE_BACKGROUND_LOOPS=0
+      # Optional runtime override; uncomment to force a method
+      # - STACKING_OVERRIDE_METHOD=bayes
+    volumes:
+      - ./backend/data:/app/backend/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        API_BASE: /api
+    container_name: models-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+networks:
+  default:
+    name: models-net
+    driver: bridge

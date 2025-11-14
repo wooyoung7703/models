@@ -5,6 +5,20 @@ import os
 import pickle
 import sys
 from datetime import datetime, timezone
+import time
+
+DEFAULT_BOTTOM_TRAIN_DAYS = int(os.getenv("BOTTOM_TRAIN_DAYS", "14"))
+try:
+    from ..core.config import settings
+except Exception:
+    if '.' not in sys.path:
+        sys.path.append('.')
+    try:
+        from backend.app.core.config import settings  # type: ignore
+    except Exception:
+        settings = None  # type: ignore
+if 'settings' in locals() and settings is not None:
+    DEFAULT_BOTTOM_TRAIN_DAYS = getattr(settings, 'BOTTOM_TRAIN_DAYS', DEFAULT_BOTTOM_TRAIN_DAYS)
 
 import numpy as np
 try:
@@ -19,11 +33,21 @@ except Exception as e:
 
 try:
     # Prefer absolute import when executed as a script
-    from backend.app.training.dataset import build_tabular_dataset, train_val_split_time_order, build_bottom_tabular_dataset
+    from backend.app.training.dataset import build_tabular_dataset, train_val_split_time_order, build_bottom_tabular_dataset, train_val_test_split_time_order
+    from backend.app.training.dataset_real import (
+        build_tabular_dataset_real,
+        build_bottom_tabular_dataset_real,
+    )
+    from backend.app.training.sequence_features import SEQUENCE_FEATURES_16
 except Exception:
     # Fallback: add repo root and retry
     sys.path.append('.')
-    from backend.app.training.dataset import build_tabular_dataset, train_val_split_time_order, build_bottom_tabular_dataset
+    from backend.app.training.dataset import build_tabular_dataset, train_val_split_time_order, build_bottom_tabular_dataset, train_val_test_split_time_order
+    from backend.app.training.dataset_real import (
+        build_tabular_dataset_real,
+        build_bottom_tabular_dataset_real,
+    )
+    from backend.app.training.sequence_features import SEQUENCE_FEATURES_16
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
 log = logging.getLogger("train_xgb")
@@ -32,7 +56,8 @@ log = logging.getLogger("train_xgb")
 def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learning_rate: float, model_out: str, mode: str, interval: str,
           past_window: int = 15, future_window: int = 60, min_gap: int = 20, tolerance_pct: float = 0.004, scale_pos_weight: float = -1.0,
           early_stopping_rounds: int = 50, seed: int = 42, subsample: float = 0.8, colsample_bytree: float = 0.8, min_child_weight: float = 1.0,
-          tb: bool = False, log_dir: str = 'runs', scale: bool = False, feature_subset: list | None = None, cache: bool = False):
+          tb: bool = False, log_dir: str = 'runs', scale: bool = False, feature_subset: list | None = None, cache: bool = False,
+          data_source: str = 'synthetic', use_feature_set: int | None = None, test_ratio: float = 0.0):
     # TensorBoard writer (optional)
     writer = None
     if tb:
@@ -47,20 +72,42 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
             except Exception as e:
                 log.warning("Failed to initialize SummaryWriter: %s", e)
     xgb_rng = np.random.default_rng(seed)
+    # Feature subset override by named set
+    if use_feature_set is not None:
+        if use_feature_set == 16:
+            feature_subset = list(SEQUENCE_FEATURES_16)
+        else:
+            log.warning("Unknown --use-feature-set=%s; ignoring", str(use_feature_set))
+
+    # Dataset selection by source
     if mode == 'reg_next_ret':
-        X, y, feature_names = build_tabular_dataset(days=days, interval=interval, scale=scale, feature_subset=feature_subset, cache=cache)
+        if data_source == 'real':
+            X, y, feature_names = build_tabular_dataset_real(days=days, interval=interval, feature_subset=feature_subset, scale=scale)
+        else:
+            X, y, feature_names = build_tabular_dataset(days=days, interval=interval, scale=scale, feature_subset=feature_subset, cache=cache)
         objective = 'reg:squarederror'
         eval_metric = 'rmse'
     elif mode == 'cls_bottom':
-        X, y, feature_names = build_bottom_tabular_dataset(days=days, interval=interval,
-                                                           past_window=past_window, future_window=future_window,
-                                                           min_gap=min_gap, tolerance_pct=tolerance_pct,
-                                                           scale=scale, feature_subset=feature_subset, cache=cache)
+        if data_source == 'real':
+            X, y, feature_names = build_bottom_tabular_dataset_real(days=days, interval=interval,
+                                                                    past_window=past_window, future_window=future_window,
+                                                                    tolerance_pct=tolerance_pct,
+                                                                    scale=scale, feature_subset=feature_subset)
+        else:
+            X, y, feature_names = build_bottom_tabular_dataset(days=days, interval=interval,
+                                                               past_window=past_window, future_window=future_window,
+                                                               min_gap=min_gap, tolerance_pct=tolerance_pct,
+                                                               scale=scale, feature_subset=feature_subset, cache=cache)
         objective = 'binary:logistic'
         eval_metric = 'logloss'
     else:
         raise ValueError(f"Unsupported mode: {mode}")
-    X_tr, X_va, y_tr, y_va = train_val_split_time_order(X, y, val_ratio=val_ratio)
+    # Time-ordered split (optional test holdout)
+    if test_ratio and test_ratio > 0:
+        X_tr, X_va, X_te, y_tr, y_va, y_te = train_val_test_split_time_order(X, y, val_ratio=val_ratio, test_ratio=test_ratio)
+    else:
+        X_tr, X_va, y_tr, y_va = train_val_split_time_order(X, y, val_ratio=val_ratio)
+        X_te = X[:0]; y_te = y[:0]
 
     # Dataset usage summary logging (source already logged inside builders)
     total_rows = X.shape[0]
@@ -80,6 +127,7 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
 
     dtrain = xgb.DMatrix(X_tr, label=y_tr, feature_names=feature_names)
     dvalid = xgb.DMatrix(X_va, label=y_va, feature_names=feature_names)
+    dtest = xgb.DMatrix(X_te, label=y_te, feature_names=feature_names) if X_te.shape[0] > 0 else None
 
     params = {
         'objective': objective,
@@ -115,6 +163,7 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
 
     # Evaluation
     pred = booster.predict(dvalid)
+    pred_test = booster.predict(dtest) if dtest is not None else None
     metrics = {}
     if mode == 'reg_next_ret':
         rmse = float(np.sqrt(np.mean((pred - y_va) ** 2)))
@@ -129,6 +178,13 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
                 writer.add_scalar('val/direction_acc', direction_acc, booster.best_iteration if hasattr(booster, 'best_iteration') else 0)
             except Exception:
                 pass
+        # Test evaluation for regression
+        if pred_test is not None and y_te is not None and len(y_te) > 0:
+            rmse_te = float(np.sqrt(np.mean((pred_test - y_te) ** 2)))
+            mae_te = float(np.mean(np.abs(pred_test - y_te)))
+            dir_te = float(np.mean(np.sign(pred_test) == np.sign(y_te)))
+            metrics.update({'test_rmse': rmse_te, 'test_mae': mae_te, 'test_direction_acc': dir_te})
+            log.info("[XGB][reg][test] RMSE=%.6f MAE=%.6f DirAcc=%.3f", rmse_te, mae_te, dir_te)
     else:
         cls = (pred >= 0.5).astype(np.int32)
         tp = int(((cls == 1) & (y_va == 1)).sum())
@@ -163,6 +219,18 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
                 writer.add_scalar('val/best_threshold', best['threshold'], booster.best_iteration if hasattr(booster, 'best_iteration') else 0)
             except Exception:
                 pass
+        # Test evaluation for classification
+        if pred_test is not None and y_te is not None and len(y_te) > 0:
+            cls_te = (pred_test >= 0.5).astype(np.int32)
+            tp_te = int(((cls_te == 1) & (y_te == 1)).sum())
+            fp_te = int(((cls_te == 1) & (y_te == 0)).sum())
+            fn_te = int(((cls_te == 0) & (y_te == 1)).sum())
+            p_te = tp_te / (tp_te + fp_te) if tp_te + fp_te > 0 else 0.0
+            r_te = tp_te / (tp_te + fn_te) if tp_te + fn_te > 0 else 0.0
+            f1_te = 2 * p_te * r_te / (p_te + r_te) if p_te + r_te > 0 else 0.0
+            metrics.update({'test_precision': p_te, 'test_recall': r_te, 'test_f1': f1_te,
+                            'test_tp': tp_te, 'test_fp': fp_te, 'test_fn': fn_te})
+            log.info("[XGB][cls][test] @0.50 TP=%d FP=%d FN=%d P=%.4f R=%.4f F1=%.4f", tp_te, fp_te, fn_te, p_te, r_te, f1_te)
 
     out_dir = os.path.dirname(model_out)
     if out_dir and not os.path.exists(out_dir):
@@ -171,17 +239,26 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
         pickle.dump({'booster': booster, 'features': feature_names, 'metrics': metrics, 'mode': mode, 'params': params}, f)
     # Persist metrics as JSON sidecar
     try:
-        import json, time
         sidecar = os.path.splitext(model_out)[0] + '.metrics.json'
         record = {
             'model_out': model_out,
             'mode': mode,
             'interval': interval,
+            'label_schema': {
+                'version': getattr(settings, 'LABEL_SCHEMA_VERSION', 'bottom_v1') if 'settings' in locals() and settings is not None else 'bottom_v1',
+                'past_window': past_window if mode == 'cls_bottom' else None,
+                'future_window': future_window if mode == 'cls_bottom' else None,
+                'min_gap': min_gap if mode == 'cls_bottom' else None,
+                'tolerance_pct': tolerance_pct if mode == 'cls_bottom' else None,
+            },
             'n_features': len(feature_names),
             'train_rows': int(dtrain.num_row()),
             'val_rows': int(dvalid.num_row()),
+            'test_rows': int(dtest.num_row()) if dtest is not None else 0,
             'metrics': metrics,
             'params': params,
+            'data_source': data_source,
+            'feature_list': feature_names,
             'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         }
         with open(sidecar, 'w') as mf:
@@ -202,8 +279,9 @@ def train(days: int, val_ratio: float, max_depth: int, n_estimators: int, learni
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--days', type=int, default=14)
+    p.add_argument('--days', type=int, default=DEFAULT_BOTTOM_TRAIN_DAYS)
     p.add_argument('--val-ratio', type=float, default=0.2)
+    p.add_argument('--test-ratio', type=float, default=0.0, help='Time-ordered test holdout ratio from the most recent segment')
     p.add_argument('--max-depth', type=int, default=6)
     p.add_argument('--n-estimators', type=int, default=300)
     p.add_argument('--learning-rate', type=float, default=0.05)
@@ -225,6 +303,8 @@ def main():
     p.add_argument('--scale', action='store_true')
     p.add_argument('--feature-subset', nargs='+', default=None, help='Subset of feature names like f0 f1 f2')
     p.add_argument('--cache', action='store_true', help='Enable simple npz caching for synthetic dataset')
+    p.add_argument('--data-source', type=str, default='synthetic', choices=['synthetic','real'], help='Dataset source: synthetic (engineered) or real (DB candles)')
+    p.add_argument('--use-feature-set', type=int, default=None, help='Named feature set: 16 uses SEQUENCE_FEATURES_16')
     # logging
     p.add_argument('--tb', action='store_true')
     p.add_argument('--log-dir', type=str, default='runs')
@@ -234,7 +314,8 @@ def main():
         past_window=args.past_window, future_window=args.future_window, min_gap=args.min_gap, tolerance_pct=args.tolerance_pct,
         scale_pos_weight=args.scale_pos_weight, early_stopping_rounds=args.early_stopping_rounds, seed=args.seed,
     subsample=args.subsample, colsample_bytree=args.colsample_bytree, min_child_weight=args.min_child_weight,
-    tb=args.tb, log_dir=args.log_dir, scale=args.scale, feature_subset=args.feature_subset, cache=args.cache)
+    tb=args.tb, log_dir=args.log_dir, scale=args.scale, feature_subset=args.feature_subset, cache=args.cache,
+    data_source=args.data_source, use_feature_set=args.use_feature_set, test_ratio=args.test_ratio)
 
 
 if __name__ == '__main__':

@@ -6,11 +6,27 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
+DEFAULT_BOTTOM_TRAIN_DAYS = int(os.getenv("BOTTOM_TRAIN_DAYS", "14"))
+try:
+    from ..core.config import settings
+except Exception:
+    if '.' not in sys.path:
+        sys.path.append('.')
+    try:
+        from backend.app.core.config import settings  # type: ignore
+    except Exception:
+        settings = None  # type: ignore
+if 'settings' in locals() and settings is not None:
+    DEFAULT_BOTTOM_TRAIN_DAYS = getattr(settings, 'BOTTOM_TRAIN_DAYS', DEFAULT_BOTTOM_TRAIN_DAYS)
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch import amp
+try:
+    from torch import amp  # type: ignore
+except Exception:
+    amp = None  # type: ignore
 try:
     from torch.utils.tensorboard import SummaryWriter  # type: ignore
 except Exception:
@@ -19,7 +35,8 @@ except Exception:
 try:
     from .utils import set_seed, to_device, get_device, compute_classification_report
 except Exception:
-    sys.path.append('.')
+    if '.' not in sys.path:
+        sys.path.append('.')
     from backend.app.training.utils import set_seed, to_device, get_device, compute_classification_report
 
 try:
@@ -27,6 +44,13 @@ try:
 except Exception:
     sys.path.append('.')
     from backend.app.training.sequence_dataset import build_bottom_sequence_dataset
+
+# Optional feature set presets
+try:
+    from .sequence_features import SEQUENCE_FEATURES_16, FULL_FEATURE_SET_V1
+except Exception:
+    SEQUENCE_FEATURES_16 = None  # type: ignore
+    FULL_FEATURE_SET_V1 = None  # type: ignore
 
 try:
     from .train_lstm import LSTMModel
@@ -75,12 +99,22 @@ def _train_lstm(X_tr, y_tr, X_va, device, batch_size, num_workers, lr, hidden_di
     pos = float((y_tr == 1).sum()); neg = float((y_tr == 0).sum())
     pos_weight_value = max(1.0, (neg / max(1.0, pos)))
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_value], dtype=torch.float32, device=device))
-    scaler = amp.GradScaler('cuda') if (amp_flag and device.type == 'cuda') else None
+    try:
+        scaler = amp.GradScaler('cuda') if (amp is not None and amp_flag and device.type == 'cuda') else None  # type: ignore[attr-defined]
+    except Exception:
+        scaler = None
     model.train()
     for xb, yb in dl_tr:
         xb, yb = to_device(xb, device), to_device(yb, device)
         opt.zero_grad(set_to_none=True)
-        with amp.autocast(device_type='cuda', enabled=(amp_flag and device.type == 'cuda')):
+        try:
+            ctx = amp.autocast(device_type='cuda', enabled=(amp is not None and amp_flag and device.type == 'cuda'))  # type: ignore[attr-defined]
+        except Exception:
+            class _Noop:
+                def __enter__(self): return None
+                def __exit__(self, *a): return False
+            ctx = _Noop()
+        with ctx:
             logits = model(xb)
             loss = loss_fn(logits, yb.float())
         if scaler is not None:
@@ -109,12 +143,22 @@ def _train_tf(X_tr, y_tr, X_va, device, batch_size, num_workers, lr, model_dim, 
     pos = float((y_tr == 1).sum()); neg = float((y_tr == 0).sum())
     pos_weight_value = max(1.0, (neg / max(1.0, pos)))
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_value], dtype=torch.float32, device=device))
-    scaler = amp.GradScaler('cuda') if (amp_flag and device.type == 'cuda') else None
+    try:
+        scaler = amp.GradScaler('cuda') if (amp is not None and amp_flag and device.type == 'cuda') else None  # type: ignore[attr-defined]
+    except Exception:
+        scaler = None
     model.train()
     for xb, yb in dl_tr:
         xb, yb = to_device(xb, device), to_device(yb, device)
         opt.zero_grad(set_to_none=True)
-        with amp.autocast(device_type='cuda', enabled=(amp_flag and device.type == 'cuda')):
+        try:
+            ctx = amp.autocast(device_type='cuda', enabled=(amp is not None and amp_flag and device.type == 'cuda'))  # type: ignore[attr-defined]
+        except Exception:
+            class _Noop:
+                def __enter__(self): return None
+                def __exit__(self, *a): return False
+            ctx = _Noop()
+        with ctx:
             logits = model(xb)
             loss = loss_fn(logits, yb.float())
         if scaler is not None:
@@ -156,15 +200,27 @@ def _train_xgb(X_tr, y_tr, X_va):
 
 
 def _time_series_folds(n: int, k: int) -> List[Tuple[np.ndarray, np.ndarray]]:
-    # simple expanding window folds
-    sizes = np.linspace(int(n * 0.2), n - 1, k, dtype=int)
-    folds = []
-    start = 0
-    for s in sizes:
-        train_idx = np.arange(0, s)
-        val_idx = np.arange(s, min(n, s + max(1, (n - s) // k)))
-        if len(val_idx) == 0:
+    """Create simple non-overlapping time-ordered folds with balanced val sizes.
+
+    Strategy:
+      - Split the timeline into (k+1) equal chunks.
+      - For each i in [1..k], use chunks [0..i-1] as train, chunk i as validation.
+      - Ensures each validation fold has ~n/(k+1) samples and avoids degenerate tiny folds.
+    """
+    if k <= 0 or n < (k + 2):
+        # Fallback to single split with 80/20
+        split = max(1, int(n * 0.8))
+        return [(np.arange(0, split), np.arange(split, n))]
+    chunk = max(1, n // (k + 1))
+    folds: List[Tuple[np.ndarray, np.ndarray]] = []
+    for i in range(1, k + 1):
+        train_end = chunk * i
+        val_start = train_end
+        val_end = min(n, val_start + chunk)
+        if val_end - val_start <= 0:
             break
+        train_idx = np.arange(0, train_end)
+        val_idx = np.arange(val_start, val_end)
         folds.append((train_idx, val_idx))
     return folds
 
@@ -185,9 +241,20 @@ def train(args):
                 writer.add_text('run/config', json.dumps({k: v for k, v in vars(args).items()}, ensure_ascii=False), 0)
             except Exception as e:
                 log.warning("Failed to initialize SummaryWriter: %s", e)
+    # Resolve optional feature subset presets
+    feature_subset = None
+    preset = getattr(args, 'use_feature_set', '')
+    if preset:
+        if preset == '16' and SEQUENCE_FEATURES_16 is not None:
+            feature_subset = list(SEQUENCE_FEATURES_16)
+        elif preset == 'full_v1' and FULL_FEATURE_SET_V1 is not None:
+            feature_subset = list(FULL_FEATURE_SET_V1)
+
     X, y = build_bottom_sequence_dataset(days=args.days, seq_len=args.seq_len, interval=args.interval,
                                          past_window=args.past_window, future_window=args.future_window,
-                                         min_gap=args.min_gap, tolerance_pct=args.tolerance_pct)
+                                         min_gap=args.min_gap, tolerance_pct=args.tolerance_pct,
+                                         feature_subset=feature_subset,
+                                         data_source=getattr(args, 'data_source', 'synthetic'))
     n = len(X)
     device = get_device(args.device)
 
@@ -221,6 +288,7 @@ def train(args):
         raise RuntimeError('scikit-learn not available for meta model')
     ensemble = getattr(args, 'ensemble', 'logistic')
     dynamic_weights = None
+    meta = None
     if ensemble == 'dynamic':
         from backend.app.training.utils import logit as _logit, sigmoid as _sigmoid
         recent_frac = float(getattr(args, 'recent_frac', 0.2))
@@ -324,6 +392,56 @@ def train(args):
         'oof_count': int(n_oof),
     }
 
+    # --- Regime-aware dynamic weights (optional) ---
+    # Compute per-model weights on recent data in low/high vol regimes using AP or top-k hit ratio
+    regime_weights = {}
+    try:
+        from backend.app.training.utils import volatility_mask
+        # Build recent window indices
+        recent_frac = float(getattr(args, 'recent_frac', 0.2))
+        start_idx = max(0, int(len(y) * (1 - recent_frac)))
+        # We need full X mask but map to OOF idx
+        mask_low_all = volatility_mask(X, percentile=getattr(args, 'regime_percentile', 0.5), feature_index=0)
+        # Define high vol as inverse of low vol quantile region
+        mask_high_all = ~mask_low_all
+        def _weights_for(mask_all):
+            # Restrict to recent and OOF indices
+            select_mask = np.zeros(len(y), dtype=bool)
+            select_mask[start_idx:] = True
+            m = mask_all & select_mask
+            m_oof = m[idx]
+            yr = y_oof[m_oof]
+            Xm = {mname: oof_probs[mname][idx][m_oof] for mname in base_names}
+            from sklearn.metrics import average_precision_score
+            ws = []
+            for mname in base_names:
+                p = Xm[mname]
+                s = 0.0
+                if len(yr) > 1 and len(np.unique(yr)) > 1:
+                    try:
+                        s = float(average_precision_score(yr, p))
+                    except Exception:
+                        s = 0.0
+                if s == 0.0 and len(yr) > 10:
+                    # fallback: top-1% hit ratio
+                    k = max(1, int(round(len(yr) * 0.01)))
+                    order = np.argsort(-p)
+                    tp = int((yr[order[:k]] == 1).sum())
+                    s = tp / k
+                ws.append(s)
+            w = np.array(ws, dtype=np.float32)
+            if w.sum() <= 0:
+                w = np.ones_like(w) / len(w)
+            else:
+                w = w / w.sum()
+            return {mname: float(wi) for mname, wi in zip(base_names, w.tolist())}
+        if mask_low_all is not None and mask_low_all.any():
+            regime_weights['low_vol'] = _weights_for(mask_low_all)
+        if mask_high_all is not None and mask_high_all.any():
+            regime_weights['high_vol'] = _weights_for(mask_high_all)
+    except Exception as e:
+        log.warning(f"[regime][weights] failed: {e}")
+
     if writer is not None:
         try:
             for k, v in payload.get('metrics', {}).items():
@@ -351,17 +469,53 @@ def train(args):
         'ensemble': ensemble,
         'version': '1.0',
     }
-    if ensemble == 'logistic':
-        meta_conf['coef'] = meta.coef_.ravel().tolist()
-        meta_conf['intercept'] = float(meta.intercept_.ravel()[0])
-        # Try to persist full sklearn model for reproducible inference
+    if ensemble == 'logistic' and meta is not None:
         try:
-            import joblib  # type: ignore
-            joblib.dump(meta, os.path.splitext(args.meta_out)[0] + '.joblib')
+            meta_conf['coef'] = meta.coef_.ravel().tolist()
+            meta_conf['intercept'] = float(meta.intercept_.ravel()[0])
+            # Try to persist full sklearn model for reproducible inference
+            try:
+                import joblib  # type: ignore
+                joblib.dump(meta, os.path.splitext(args.meta_out)[0] + '.joblib')
+            except Exception:
+                pass
         except Exception:
             pass
     if dynamic_weights is not None:
         meta_conf['dynamic_weights'] = dynamic_weights
+    if regime_weights:
+        meta_conf['regime_weights'] = regime_weights
+
+    # --- Calibration (optional) ---
+    # Supports platt (logistic) or isotonic regression on meta_prob vs y_oof
+    calibration_method = getattr(args, 'calibration', 'none')
+    calibration_block = {}
+    if calibration_method in {'platt', 'isotonic'}:
+        try:
+            if calibration_method == 'platt':
+                # Fit logistic regression on logit(meta_prob)
+                from sklearn.linear_model import LogisticRegression as _LogReg  # type: ignore
+                eps = 1e-9
+                p_clip = np.clip(meta_prob, eps, 1 - eps)
+                logit_vals = np.log(p_clip / (1 - p_clip)).reshape(-1, 1)
+                lr_cal = _LogReg(class_weight='balanced', max_iter=1000)
+                lr_cal.fit(logit_vals, y_oof)
+                a = float(lr_cal.coef_.ravel()[0])
+                b = float(lr_cal.intercept_.ravel()[0])
+                calibration_block = {'method': 'platt', 'a': a, 'b': b}
+            elif calibration_method == 'isotonic':
+                from sklearn.isotonic import IsotonicRegression  # type: ignore
+                iso = IsotonicRegression(out_of_bounds='clip')
+                iso.fit(meta_prob, y_oof)
+                # store mapping points for lightweight inference (x,y pairs)
+                xs = iso.X_thresholds_.tolist()
+                ys = iso.y_thresholds_.tolist()
+                calibration_block = {'method': 'isotonic', 'points': list(map(list, zip(xs, ys)))}
+        except Exception as e:
+            log.warning(f"[calibration] failed: {e}")
+    if calibration_block:
+        meta_conf['calibration'] = calibration_block
+        payload['calibration'] = calibration_block
     with open(args.meta_out, 'w') as f:
         json.dump(meta_conf, f, ensure_ascii=False, indent=2)
 
@@ -379,7 +533,7 @@ def train(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--days', type=int, default=7)
+    p.add_argument('--days', type=int, default=DEFAULT_BOTTOM_TRAIN_DAYS)
     p.add_argument('--seq-len', type=int, default=16)
     p.add_argument('--interval', type=str, default='1m')
     p.add_argument('--batch-size', type=int, default=64)
@@ -401,6 +555,10 @@ def main():
     p.add_argument('--regime-percentile', type=float, default=0.5)
     p.add_argument('--t-low', type=float, default=0.50)
     p.add_argument('--t-high', type=float, default=0.995)
+    # feature selection
+    p.add_argument('--use-feature-set', type=str, default='', choices=['','16','full_v1'], help='Predefined feature set alias')
+    # data source
+    p.add_argument('--data-source', type=str, default='synthetic', choices=['synthetic','real'], help='Use real Candle-derived features from DB or synthetic dataset')
     # logging
     p.add_argument('--tb', action='store_true', help='Enable TensorBoard logging')
     p.add_argument('--log-dir', type=str, default='runs', help='TensorBoard log directory')
@@ -410,6 +568,9 @@ def main():
     p.add_argument('--lstm-hidden-dim', type=int, default=32)
     p.add_argument('--tf-lr', type=float, default=1e-3)
     p.add_argument('--tf-model-dim', type=int, default=32)
+
+    # calibration
+    p.add_argument('--calibration', type=str, default='none', choices=['none','platt','isotonic'], help='Optional probability calibration on OOF ensemble output')
 
     p.add_argument('--meta-out', type=str, default='backend/app/training/models/stacking_meta.json')
     args = p.parse_args()
