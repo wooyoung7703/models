@@ -92,7 +92,7 @@ async def health_models():
 async def health_trading():
     """Expose trading-related settings and quick status.
 
-    Returns leverage and cooldown from TradeManager, TP/SL/max_adds defaults from Trade model,
+    Returns leverage and cooldown from TradeManager and TP/SL defaults from Trade model,
     and a compact summary of open trades including next add timing.
     """
     from datetime import datetime
@@ -109,7 +109,6 @@ async def health_trading():
         "defaults": {
             "take_profit_pct": getattr(_settings, 'TAKE_PROFIT_PCT', probe.take_profit_pct),
             "stop_loss_pct": getattr(_settings, 'STOP_LOSS_PCT', probe.stop_loss_pct),
-            "max_adds": getattr(_settings, 'MAX_ADDS', probe.max_adds),
             "tp_mode": getattr(_settings, 'TP_MODE', 'fixed'),
             "tp_trigger": getattr(_settings, 'TP_TRIGGER', None),
             "tp_step": getattr(_settings, 'TP_STEP', None),
@@ -187,7 +186,18 @@ async def health_features(symbol: str | None = None, include_psi: int = 1):
                 result["latest_open_time"] = latest.open_time.isoformat()
                 result["latest_close_time"] = latest.close_time.isoformat() if getattr(latest, "close_time", None) else None
                 result["data_fresh_seconds"] = max(0.0, (now - latest.open_time.replace(tzinfo=latest.open_time.tzinfo or timezone.utc)).total_seconds())
-                feature_names = [f for f in Candle.__fields__.keys() if f not in base_fields]
+                def _get_model_fields(model_cls):
+                    mf = getattr(model_cls, "model_fields", None)
+                    if isinstance(mf, dict):
+                        return list(mf.keys())
+                    ff = getattr(model_cls, "__fields__", None)
+                    if isinstance(ff, dict):
+                        return list(ff.keys())
+                    ann = getattr(model_cls, "__annotations__", None)
+                    if isinstance(ann, dict):
+                        return list(ann.keys())
+                    return []
+                feature_names = [f for f in _get_model_fields(Candle) if f not in base_fields]
                 nulls = sum(1 for f in feature_names if getattr(latest, f) is None)
                 result["latest_feature_null_ratio"] = float(nulls/len(feature_names)) if feature_names else 0.0
             else:
@@ -221,7 +231,18 @@ async def health_features(symbol: str | None = None, include_psi: int = 1):
                     cur_start = now - _td(hours=24)
                     cur_end = now
                     # Select core features present in Candle
-                    candle_fields = set(Candle.__fields__.keys())
+                    def _get_model_fields2(model_cls):
+                        mf = getattr(model_cls, "model_fields", None)
+                        if isinstance(mf, dict):
+                            return list(mf.keys())
+                        ff = getattr(model_cls, "__fields__", None)
+                        if isinstance(ff, dict):
+                            return list(ff.keys())
+                        ann = getattr(model_cls, "__annotations__", None)
+                        if isinstance(ann, dict):
+                            return list(ann.keys())
+                        return []
+                    candle_fields = set(_get_model_fields2(Candle))
                     core = [
                         "rsi_14","bb_pct_b_20_2","macd_hist","vol_z_20","williams_r_14",
                         "drawdown_from_max_20","atr_14","cci_20","run_up","run_down","obv","mfi_14","cmf_20",
@@ -543,7 +564,6 @@ async def list_trades(limit: int = 50):
                 "avg_price": t.avg_price,
                 "quantity": t.quantity,
                 "adds_done": t.adds_done,
-                "max_adds": t.max_adds,
                 "take_profit_pct": t.take_profit_pct,
                 "stop_loss_pct": t.stop_loss_pct,
                 "last_price": t.last_price,
@@ -595,24 +615,69 @@ async def list_open_trades():
         return out
 
 
-    @app.get("/admin/reload_models")
-    async def admin_reload_models():
-        """Reload model artifacts from settings paths (base + stacking)."""
-        try:
-            registry.load_from_settings()
-            return {"status": "ok", "registry": registry.status()}
-        except Exception as e:
-            logging.exception("admin_reload_models error: %s", e)
-            return {"error": str(e)}
+@app.get("/admin/reload_models")
+async def admin_reload_models():
+    """Reload model artifacts from settings paths (base + stacking)."""
+    try:
+        registry.load_from_settings()
+        return {"status": "ok", "registry": registry.status()}
+    except Exception as e:
+        logging.exception("admin_reload_models error: %s", e)
+        return {"error": str(e)}
 
 
-    @app.post("/admin/trigger_monthly_training")
-    async def admin_trigger_monthly_training():
-        """Manually trigger the monthly 3-model training sequence now (async)."""
-        try:
-            asyncio.create_task(trigger_now_background())
-            return {"status": "accepted"}
-        except Exception as e:
-            logging.exception("admin_trigger_monthly_training error: %s", e)
-            return {"error": str(e)}
+@app.post("/admin/trigger_monthly_training")
+async def admin_trigger_monthly_training():
+    """Manually trigger the monthly 3-model training sequence now (async)."""
+    try:
+        asyncio.create_task(trigger_now_background())
+        return {"status": "accepted"}
+    except Exception as e:
+        logging.exception("admin_trigger_monthly_training error: %s", e)
+        return {"error": str(e)}
+
+
+@app.post("/admin/trigger_prob_drift_retrain")
+async def admin_trigger_prob_drift_retrain():
+    """Trigger a probability drift retrain immediately (async) if enabled."""
+    try:
+        trigger_prob_drift_retrain()
+        return {"status": "accepted"}
+    except Exception as e:
+        logging.exception("admin_trigger_prob_drift_retrain error: %s", e)
+        return {"error": str(e)}
+
+
+@app.post("/admin/scheduler/start")
+async def admin_scheduler_start(tz: str | None = None):
+    """Start the scheduler (idempotent). Optional timezone override via ?tz=..."""
+    try:
+        tz_name = tz or getattr(settings, 'SCHEDULER_TZ', None)
+        start_scheduler(timezone_name=tz_name)
+        return {"status": "ok", "tz": tz_name or "default"}
+    except Exception as e:
+        logging.exception("admin_scheduler_start error: %s", e)
+        return {"error": str(e)}
+
+
+@app.post("/admin/scheduler/stop")
+async def admin_scheduler_stop():
+    """Stop the scheduler (idempotent)."""
+    try:
+        stop_scheduler()
+        return {"status": "ok"}
+    except Exception as e:
+        logging.exception("admin_scheduler_stop error: %s", e)
+        return {"error": str(e)}
+
+
+@app.get("/admin/scheduler/status")
+async def admin_scheduler_status():
+    """Return training/meta status including next runs and warnings for UI display."""
+    try:
+        meta = get_last_retrain_meta()
+        return {"status": "ok", "data": meta}
+    except Exception as e:
+        logging.exception("admin_scheduler_status error: %s", e)
+        return {"error": str(e)}
 

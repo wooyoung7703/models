@@ -39,7 +39,7 @@ def _parse_list_floats(v: str) -> List[float]:
 
 cols = (
     'quantile', 'tp', 'n_trades_closed', 'wins', 'losses',
-    'avg_adds_per_trade', 'max_adds_per_trade', 'net_pnl_usdt',
+    'avg_adds_per_trade', 'net_pnl_usdt',
     'net_return_pct_on_1k', 'worst_unrealized_move_pct'
 )
 

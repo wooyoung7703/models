@@ -40,6 +40,12 @@ def backtest(days: int = 30) -> Dict[str, Any]:
     itv = settings.INTERVAL
     # Create temp backtest DB for simulated trades
     bt_path = _ROOT / 'backend' / 'data' / 'backtest_tmp.db'
+    # Ensure fresh schema (old file may contain deprecated columns like max_adds)
+    try:
+        if bt_path.exists():
+            bt_path.unlink()
+    except Exception:
+        pass
     bt_url = f"sqlite:///{bt_path}"
     bt_engine = create_engine(bt_url, echo=False)
     # Create only trades tables in temp DB

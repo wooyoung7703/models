@@ -32,7 +32,7 @@ def _parse_list_floats(v: str) -> List[float]:
     return out
 
 cols = (
-    'sl', 'n_trades_closed', 'wins', 'losses', 'avg_adds_per_trade', 'max_adds_per_trade',
+    'sl', 'n_trades_closed', 'wins', 'losses', 'avg_adds_per_trade',
     'net_pnl_usdt', 'net_return_pct_on_1k', 'max_trade_net_pnl_usdt', 'min_trade_net_pnl_usdt'
 )
 

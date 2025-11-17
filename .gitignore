@@ -36,3 +36,6 @@ coverage.xml
 # Misc
 *.bak
 *.tmp
+
+# Windows reserved device filename accidentally created
+NUL

@@ -122,7 +122,6 @@ def compute_capitalized(trades: list[dict], initial_notional: float, add_notiona
         'wins': wins,
         'losses': losses,
         'avg_adds_per_trade': (sum(adds_hist)/len(adds_hist)) if adds_hist else 0.0,
-        'max_adds_per_trade': max(adds_hist) if adds_hist else 0,
         'net_pnl_usdt': round(total_net, 2),
         'fees_usdt': round(total_fees, 2),
         'net_return_pct_on_1k': round(100.0 * (total_net / 1000.0), 2),

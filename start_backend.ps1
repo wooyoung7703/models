@@ -16,7 +16,7 @@ $env:STACKING_THRESHOLD = '-1'
 $env:PREDICT_INTERVAL_SECONDS = '10'
 $env:LOG_LEVEL = 'INFO'
 $env:LOG_FORMAT = 'json'
-$cmd = "python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 >> `"$logPath`" 2>>&1"
+$cmd = "python -m backend.app.ws_server >> `"$logPath`" 2>>&1"
 Start-Process -FilePath cmd.exe -ArgumentList '/c', $cmd -WindowStyle Hidden
 Start-Sleep -Seconds 3
 if (Test-Path -LiteralPath $logPath) {

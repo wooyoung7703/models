@@ -3,7 +3,9 @@ services:
   backend:
     environment:
       - LOG_LEVEL=DEBUG
-      - DISABLE_BACKGROUND_LOOPS=1
+      # Enable background loops (collector/resampler/predictor) for real-time data.
+      # Set to 1 to disable them during fast unit tests.
+      - DISABLE_BACKGROUND_LOOPS=0
     # Mount source for fast iteration
     volumes:
       - ./backend:/app/backend
@@ -18,3 +20,6 @@ services:
       "--port","8000",
       "--reload"
     ]
+
+  # Frontend dev is served by the same Nginx image as prod.
+  # Edit code locally, then rebuild `models-frontend` via `docker compose build frontend` when needed.

@@ -77,6 +77,31 @@ class XGBTabularAdapter(BaseAdapter):
                 self._booster = booster
                 self._features = []  # unknown; will fall back to getattr mapping or zeros
                 log.info("[xgb] loaded raw model from %s", self.model_path)
+            # Health check: match feature names to Candle fields (best-effort)
+            try:
+                from .models import Candle  # local import
+                candle_fields = []
+                mf = getattr(Candle, 'model_fields', None)
+                if isinstance(mf, dict):
+                    candle_fields = list(mf.keys())
+                elif isinstance(getattr(Candle, '__fields__', None), dict):
+                    candle_fields = list(getattr(Candle, '__fields__').keys())
+                elif isinstance(getattr(Candle, '__annotations__', None), dict):
+                    candle_fields = list(getattr(Candle, '__annotations__').keys())
+                candle_set = set(candle_fields)
+                generic = [f for f in self._features if f.startswith('f') and f[1:].isdigit()]
+                matched = [f for f in self._features if f in candle_set]
+                missing = [f for f in self._features if f not in candle_set and f not in generic]
+                if self._features:
+                    log.info(
+                        "[xgb] feature mapping: total=%d matched=%d generic=%d missing=%d", 
+                        len(self._features), len(matched), len(generic), len(missing)
+                    )
+                    if missing:
+                        # Only warn once; large list may be noisy
+                        log.warning("[xgb] %d feature names not found in Candle schema (first 8): %s", len(missing), missing[:8])
+            except Exception as _e:
+                log.debug("[xgb] feature health check skipped: %s", _e)
         except Exception as e:
             log.warning("[xgb] load failed: %s", e)
 
@@ -115,7 +140,21 @@ class XGBTabularAdapter(BaseAdapter):
             if self._booster is None:
                 raise RuntimeError("booster not loaded")
             p = float(self._booster.predict(dmat)[0])  # type: ignore[attr-defined]
-            return PredictResult(prob=p, ready=True, details={"features": len(self._features)})
+            # Normalize to probability if model outputs logit/margin
+            normalized = False
+            try:
+                if p < 0.0 or p > 1.0:
+                    import math as _m
+                    p = 1.0 / (1.0 + _m.exp(-p))
+                    normalized = True
+                # Final clamp for safety
+                p = max(0.0, min(1.0, p))
+            except Exception:
+                pass
+            details = {"features": len(self._features)}
+            if normalized:
+                details["from_logit"] = True
+            return PredictResult(prob=p, ready=True, details=details)
         except Exception as e:
             log.warning("[xgb] predict failed: %s", e)
             return PredictResult(prob=None, ready=False, details={"error": str(e)})
@@ -141,8 +180,10 @@ class LSTMSeqAdapter(BaseAdapter):
         from .seq_buffer import get_buffer
         try:
             buf = get_buffer(getattr(row, 'symbol', 'unknown'))
-            if len(buf) < settings.SEQ_MIN_READY:
-                return PredictResult(prob=None, ready=False, details={"reason": "insufficient_sequence", "have": len(buf)})
+            have = len(buf)
+            need = int(settings.SEQ_MIN_READY)
+            if have < need:
+                return PredictResult(prob=None, ready=False, details={"reason": "insufficient_sequence", "have": have, "need": need})
             import torch
             seq = buf.to_list()[-self.seq_len:]
             x = torch.tensor([seq], dtype=torch.float32)
@@ -161,7 +202,7 @@ class LSTMSeqAdapter(BaseAdapter):
             if prob < 0.0 or prob > 1.0:
                 import math
                 prob = 1/(1+math.exp(-prob))
-            return PredictResult(prob=prob, ready=True, details={"seq_len": len(seq), "feature_dim": self._feature_dim, "padded": self._feature_dim is not None and self._feature_dim > len(seq[0])})
+            return PredictResult(prob=prob, ready=True, details={"have": have, "need": need, "seq_len": len(seq), "feature_dim": self._feature_dim, "padded": self._feature_dim is not None and self._feature_dim > len(seq[0])})
         except Exception as e:
             return PredictResult(prob=None, ready=False, details={"error": str(e)})
 
@@ -255,8 +296,10 @@ class TFSeqAdapter(BaseAdapter):
         from .seq_buffer import get_buffer
         try:
             buf = get_buffer(getattr(row, 'symbol', 'unknown'))
-            if len(buf) < settings.SEQ_MIN_READY:
-                return PredictResult(prob=None, ready=False, details={"reason": "insufficient_sequence", "have": len(buf)})
+            have = len(buf)
+            need = int(settings.SEQ_MIN_READY)
+            if have < need:
+                return PredictResult(prob=None, ready=False, details={"reason": "insufficient_sequence", "have": have, "need": need})
             import torch
             seq = buf.to_list()[-self.seq_len:]
             x = torch.tensor([seq], dtype=torch.float32)
@@ -273,7 +316,7 @@ class TFSeqAdapter(BaseAdapter):
             if prob < 0.0 or prob > 1.0:
                 import math
                 prob = 1/(1+math.exp(-prob))
-            return PredictResult(prob=prob, ready=True, details={"seq_len": len(seq), "feature_dim": self._feature_dim, "padded": self._feature_dim is not None and self._feature_dim > len(seq[0])})
+            return PredictResult(prob=prob, ready=True, details={"have": have, "need": need, "seq_len": len(seq), "feature_dim": self._feature_dim, "padded": self._feature_dim is not None and self._feature_dim > len(seq[0])})
         except Exception as e:
             return PredictResult(prob=None, ready=False, details={"error": str(e)})
 
@@ -392,6 +435,22 @@ class StackingCombiner:
         self.bayes_weights: Optional[Dict[str, float]] = None
         self._loaded = False
         self._load()
+        # Optional bottom-vs-forecast meta (secondary logistic adjustment)
+        self.bvf_meta_path: Optional[str] = getattr(settings, 'BOTTOM_VS_FORECAST_META_PATH', None)
+        self.bvf_coef: Optional[List[float]] = None
+        self.bvf_intercept: Optional[float] = None
+        self._load_bvf_meta()
+        self.bvf_metrics: Optional[Dict[str, Any]] = None
+        # Optional entry meta (precision gating)
+        self.entry_meta_path: Optional[str] = getattr(settings, 'ENTRY_META_PATH', None)
+        self.entry_coef: Optional[List[float]] = None
+        self.entry_intercept: Optional[float] = None
+        self.entry_threshold_sidecar: Optional[float] = None
+        self._load_entry_meta()
+        # Dynamic entry threshold (runtime-adapted)
+        self.entry_threshold_dynamic: Optional[float] = None
+        # Dynamic entry threshold by symbol (runtime-adapted per symbol)
+        self.entry_threshold_dynamic_by_symbol: Dict[str, float] = {}
 
     def _load(self) -> None:
         try:
@@ -430,6 +489,74 @@ class StackingCombiner:
         except Exception as e:
             log.warning("[stacking] load failed: %s", e)
 
+    def _load_bvf_meta(self) -> None:
+        """Load optional bottom_vs_forecast meta logistic coefficients.
+
+        Expected JSON format:
+          {
+            "features": ["bottom_prob", "room_to_forecast_min", ...],
+            "coef": [...],
+            "intercept": ...
+          }
+        Only the first coefficient (bottom_prob) is used currently because
+        real-time forecast-derived features are not yet available in predictor loop.
+        """
+        try:
+            if not self.bvf_meta_path or not os.path.exists(self.bvf_meta_path):
+                return
+            with open(self.bvf_meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            coef = meta.get('coef'); intercept = meta.get('intercept')
+            if isinstance(coef, list) and isinstance(intercept, (int, float)) and coef:
+                # store full list; predictor will map features in order:
+                # [bottom_prob, room_to_forecast_min, rel_to_forecast_mean, forecast_expected_return]
+                self.bvf_coef = [float(c) for c in coef]
+                self.bvf_intercept = float(intercept)
+                # capture metrics for frontend display if present
+                try:
+                    self.bvf_metrics = {
+                        'brier_new': meta.get('brier_new'),
+                        'prev_rel_improve': (meta.get('prev') or {}).get('rel_improve'),
+                        'prev_brier_old': (meta.get('prev') or {}).get('brier_old'),
+                        'retrain_samples': meta.get('retrain_samples'),
+                    }
+                except Exception:
+                    self.bvf_metrics = None
+                log.info("[stacking][bvf] loaded bottom_vs_forecast meta (n_coef=%d intercept=%.4f path=%s)", len(self.bvf_coef), self.bvf_intercept, self.bvf_meta_path)
+        except Exception as e:
+            log.warning("[stacking][bvf] load failed: %s", e)
+
+    def _load_entry_meta(self) -> None:
+        """Load optional entry meta logistic coefficients focused on precision.
+
+        Expected JSON format:
+          {
+            "features": ["p_use", "margin", "room_to_forecast_min", "rel_to_forecast_mean", "forecast_expected_return"],
+            "coef": [...],
+            "intercept": ...,
+            "threshold": 0.9   # optional; prioritizes precision if present
+          }
+        We store coef/intercept/threshold for runtime use in predictor.
+        """
+        try:
+            if not self.entry_meta_path or not os.path.exists(self.entry_meta_path):
+                return
+            with open(self.entry_meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            coef = meta.get('coef'); intercept = meta.get('intercept')
+            th = meta.get('threshold')
+            if isinstance(coef, list) and isinstance(intercept, (int, float)) and coef:
+                self.entry_coef = [float(c) for c in coef]
+                self.entry_intercept = float(intercept)
+                if isinstance(th, (int, float)):
+                    self.entry_threshold_sidecar = float(th)
+                log.info(
+                    "[stacking][entry-meta] loaded (n_coef=%d intercept=%.4f th=%s path=%s)",
+                    len(self.entry_coef), self.entry_intercept, str(self.entry_threshold_sidecar), self.entry_meta_path
+                )
+        except Exception as e:
+            log.warning("[stacking][entry-meta] load failed: %s", e)
+
     def ready(self) -> bool:
         return self._loaded and bool(self.model_order)
 
@@ -458,7 +585,18 @@ class StackingCombiner:
             return {"ready": False, "reason": "meta_not_ready"}
         vals: List[float] = []
         used: List[str] = []
-        for name in self.model_order:
+        # Base set from meta order
+        order: List[str] = list(self.model_order)
+        # Optionally include any additional ready base models not present in meta
+        try:
+            from .core.config import settings as _s
+            if getattr(_s, 'STACKING_INCLUDE_ALL_READY', False):
+                extras = [k for k, v in probs.items() if v is not None and k not in order]
+                if extras:
+                    order.extend(extras)
+        except Exception:
+            pass
+        for name in order:
             p = probs.get(name)
             if p is None:
                 continue
@@ -489,6 +627,10 @@ class StackingCombiner:
                     method = "dynamic_regime"
             except Exception:
                 pass
+        # If we extended models beyond meta (weights may be missing), fall back to mean safely
+        extended_beyond_meta = len(used) > len(self.model_order)
+        if extended_beyond_meta:
+            method = "mean"
         if method == "logistic" and self.coef is not None and self.intercept is not None and z == 0.0:
             # align coef to used order subset if needed
             try:
@@ -565,7 +707,7 @@ class StackingCombiner:
                 th = self.best_threshold
                 th_source = "sidecar"
         decision = (prob >= th) if th is not None else None
-        return {
+        out = {
             "ready": True,
             "method": method,
             "used_models": used,
@@ -579,6 +721,7 @@ class StackingCombiner:
             "cal_method": self.calibration.get("method") if self.calibration else None,
             "regime_used": regime if (self.regime_weights is not None and regime in ("low_vol","high_vol")) else None,
         }
+        return out
 
 
 # Global registry helpers
@@ -655,6 +798,22 @@ class ModelRegistry:
                     "threshold": th,
                     "threshold_source": th_source,
                 })
+                # Expose entry-meta observability
+                try:
+                    em_loaded = (self.stacking.entry_coef is not None and self.stacking.entry_intercept is not None)
+                    stk["entry_meta"] = {
+                        "enabled": bool(getattr(settings, 'ENABLE_ENTRY_META', False)),
+                        "gate_enabled": bool(getattr(settings, 'ENTRY_META_GATE_ENABLED', True)),
+                        "use_adjusted_prob": bool(getattr(settings, 'ENTRY_META_USE_ADJUSTED_PROB', True)),
+                        "loaded": em_loaded,
+                        "threshold_env": float(getattr(settings, 'ENTRY_META_THRESHOLD', 0.0)),
+                        "threshold_sidecar": (float(self.stacking.entry_threshold_sidecar)
+                                               if isinstance(self.stacking.entry_threshold_sidecar, (int, float)) else None),
+                        "threshold_dynamic": (float(self.stacking.entry_threshold_dynamic)
+                                               if isinstance(self.stacking.entry_threshold_dynamic, (int, float)) else None),
+                    }
+                except Exception:
+                    pass
         except Exception:
             pass
         return {

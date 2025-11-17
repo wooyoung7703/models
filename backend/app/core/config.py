@@ -57,6 +57,8 @@ class Settings:
 
     RECONNECT_MIN_SEC: float = float(os.getenv("RECONNECT_MIN_SEC", "1"))
     RECONNECT_MAX_SEC: float = float(os.getenv("RECONNECT_MAX_SEC", "30"))
+    # Websocket connection open timeout (seconds) to distinguish slow DNS vs hard failure
+    WS_OPEN_TIMEOUT_SECONDS: int = int(os.getenv("WS_OPEN_TIMEOUT_SECONDS", "15"))
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -107,6 +109,9 @@ class Settings:
     STACKING_THRESHOLD: float = float(os.getenv("STACKING_THRESHOLD", "0.78"))  # set -1 to prefer sidecar/adaptive
     # Optional override for ensemble method at runtime (rollback/risk control): '', 'logistic','dynamic','bayes','mean'
     STACKING_OVERRIDE_METHOD: str = os.getenv("STACKING_OVERRIDE_METHOD", "").lower()
+    # If true, stacking will include all ready base models present at runtime.
+    # When meta lacks weights for extras, combiner safely falls back to 'mean'.
+    STACKING_INCLUDE_ALL_READY: bool = os.getenv("STACKING_INCLUDE_ALL_READY", "1") in {"1","true","True"}
     # Sequence length for LSTM/Transformer if enabled
     SEQ_LEN: int = int(os.getenv("SEQ_LEN", "30"))
     # Minimum recent sequences required before seq model inference
@@ -114,7 +119,8 @@ class Settings:
     # Trading: cooldown between DCA adds (seconds)
     ADD_COOLDOWN_SECONDS: int = int(os.getenv("ADD_COOLDOWN_SECONDS", "600"))
     # Trading: default TP/SL and DCA limits
-    TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.005"))   # +0.5% as default per latest tuning
+    # Compromise live mode: target +0.8% net move
+    TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.008"))   # +0.8% compromise TP
     STOP_LOSS_PCT_RAW: str | None = os.getenv("STOP_LOSS_PCT", None)
     @property
     def STOP_LOSS_PCT(self) -> float | None:
@@ -122,12 +128,25 @@ class Settings:
             return float(self.STOP_LOSS_PCT_RAW) if self.STOP_LOSS_PCT_RAW is not None else None
         except Exception:
             return None
-    MAX_ADDS: int = int(os.getenv("MAX_ADDS", "1000"))
     # Trailing TP defaults
-    TP_MODE: str = os.getenv("TP_MODE", "trailing").lower()  # 'fixed' | 'trailing'
+    # Fixed TP for compromise policy (was 'trailing')
+    TP_MODE: str = os.getenv("TP_MODE", "fixed").lower()  # 'fixed' | 'trailing'
     TP_TRIGGER: float = float(os.getenv("TP_TRIGGER", "0.005"))
     TP_STEP: float = float(os.getenv("TP_STEP", "0.0005"))
     TP_GIVEBACK: float = float(os.getenv("TP_GIVEBACK", "0.001"))
+
+    # --- Fees (applied in backtests and PnL snapshots at close) ---
+    # Percent fees (e.g., 0.0004 = 0.04%) per side; defaults approximate futures taker fees
+    FEE_ENTRY_PCT: float = float(os.getenv("FEE_ENTRY_PCT", "0.0004"))
+    FEE_EXIT_PCT: float = float(os.getenv("FEE_EXIT_PCT", "0.0004"))
+
+    # --- Backtest/Exit policy toggles ---
+    # If true, ignore stop loss checks (no SL)
+    # Disable SL by default for compromise policy (evaluate adds + controlled TP)
+    DISABLE_STOP_LOSS: bool = os.getenv("DISABLE_STOP_LOSS", "1") in {"1","true","True"}
+    # If true, evaluate fixed TP using net-of-fees PnL instead of gross move
+    # Evaluate TP on net-of-fees move to ensure real profit capture
+    TP_DECISION_ON_NET: bool = os.getenv("TP_DECISION_ON_NET", "1") in {"1","true","True"}
 
     # --- Calibration & Smoothing & Adaptive Threshold ---
     # Enable application of calibration parameters from stacking meta (if present)
@@ -189,6 +208,89 @@ class Settings:
         except Exception:
             pass
         return self.STACKING_META_DAYS
+
+    # --- Model file watcher (backend auto-reload) ---
+    MODEL_WATCH_ENABLED: bool = os.getenv("MODEL_WATCH_ENABLED", "1") in {"1","true","True"}
+    MODEL_WATCH_INTERVAL_SECONDS: int = int(os.getenv("MODEL_WATCH_INTERVAL_SECONDS", "60"))
+
+    # --- Bottom vs Forecast meta (optional runtime probability adjustment) ---
+    # Path to logistic meta JSON produced by scripts/bottom_vs_forecast_analysis.py
+    # Default points to repo root data/ directory.
+    BOTTOM_VS_FORECAST_META_PATH: str = os.getenv(
+        "BOTTOM_VS_FORECAST_META_PATH",
+        str(Path(__file__).resolve().parents[3] / "data" / "bottom_vs_forecast_meta.json"),
+    )
+    # Real-time naive forecast horizon (steps) for bottom-vs-forecast adjustment
+    FORECAST_HORIZON: int = int(os.getenv("FORECAST_HORIZON", "12"))
+    # ATR smoothing alpha for forward path volatility estimate
+    FORECAST_ATR_ALPHA: float = float(os.getenv("FORECAST_ATR_ALPHA", "0.2"))
+    # Clamp for adjusted probability delta vs base (absolute). If <=0 disable.
+    ADJUSTED_DELTA_CLAMP: float = float(os.getenv("ADJUSTED_DELTA_CLAMP", "0.25"))
+    # Fallback mode when |delta| > clamp: 'limit' -> clip; 'revert' -> keep base
+    ADJUSTED_DELTA_FALLBACK_MODE: str = os.getenv("ADJUSTED_DELTA_FALLBACK_MODE", "limit").lower()
+    # Divergence watchdog thresholds (override adjusted prob if unstable)
+    ADJUSTED_DIVERGENCE_MEAN_THRESHOLD: float = float(os.getenv("ADJUSTED_DIVERGENCE_MEAN_THRESHOLD", "0.15"))
+    ADJUSTED_DIVERGENCE_ABS_MEAN_THRESHOLD: float = float(os.getenv("ADJUSTED_DIVERGENCE_ABS_MEAN_THRESHOLD", "0.18"))
+    ADJUSTED_DIVERGENCE_MIN_SAMPLES: int = int(os.getenv("ADJUSTED_DIVERGENCE_MIN_SAMPLES", "60"))
+    ADJUSTED_DIVERGENCE_ACTION: str = os.getenv("ADJUSTED_DIVERGENCE_ACTION", "revert").lower()  # 'revert' | 'log'
+
+    # --- Automated meta retraining (bottom-vs-forecast logistic layer) ---
+    META_RETRAIN_ENABLED: bool = os.getenv("META_RETRAIN_ENABLED", "0") in {"1","true","True"}
+    # Either run every N minutes (takes precedence if >0) or at daily HH:MM.
+    META_RETRAIN_EVERY_MINUTES: int = int(os.getenv("META_RETRAIN_EVERY_MINUTES", "0"))  # e.g. 720 for 12h
+    META_RETRAIN_DAILY_AT: str = os.getenv("META_RETRAIN_DAILY_AT", "03:15")  # HH:MM local scheduler TZ
+    META_RETRAIN_MIN_INTERVAL_MINUTES: int = int(os.getenv("META_RETRAIN_MIN_INTERVAL_MINUTES", "60"))
+    # Relative Brier improvement requirement to overwrite meta (passed to script)
+    META_RETRAIN_MIN_REL_BRIER_IMPROVE: float = float(os.getenv("META_RETRAIN_MIN_REL_BRIER_IMPROVE", "0.005"))
+    # Evaluation CSV path (new labeled rows + forward preds). Default sample if not provided.
+    BOTTOM_VS_FORECAST_EVAL_CSV_PATH: str = os.getenv(
+        "BOTTOM_VS_FORECAST_EVAL_CSV_PATH",
+        str(Path(__file__).resolve().parents[3] / "data" / "bottom_eval_sample.csv"),
+    )
+    # Meta JSON output (reuse existing path for overwrite)
+    BOTTOM_VS_FORECAST_META_OUT_PATH: str = os.getenv(
+        "BOTTOM_VS_FORECAST_META_OUT_PATH",
+        BOTTOM_VS_FORECAST_META_PATH,
+    )
+
+    # --- Entry Meta (precision-focused gating for win-rate) ---
+    # Enable secondary logistic meta to gate entries with high precision.
+    ENABLE_ENTRY_META: bool = os.getenv("ENABLE_ENTRY_META", "0") in {"1","true","True"}
+    # Path to entry meta JSON (format: {"features": [...], "coef": [...], "intercept": ..., "threshold": 0.xx (optional)})
+    ENTRY_META_PATH: str = os.getenv(
+        "ENTRY_META_PATH",
+        str(Path(__file__).resolve().parents[3] / "data" / "entry_meta.json"),
+    )
+    # If JSON lacks threshold, use this env threshold (higher favors precision)
+    ENTRY_META_THRESHOLD: float = float(os.getenv("ENTRY_META_THRESHOLD", "0.90"))
+    # Whether to use adjusted prob (after BVF) as the primary feature
+    ENTRY_META_USE_ADJUSTED_PROB: bool = os.getenv("ENTRY_META_USE_ADJUSTED_PROB", "1") in {"1","true","True"}
+    # Optional cooldown to avoid excessive recomputation (seconds, 0=disabled)
+    ENTRY_META_MIN_INTERVAL_SECONDS: int = int(os.getenv("ENTRY_META_MIN_INTERVAL_SECONDS", "0"))
+    # Require entry_meta decision true for trade entry/add (improves precision). If disabled, fallback to stacking decision only.
+    ENTRY_META_GATE_ENABLED: bool = os.getenv("ENTRY_META_GATE_ENABLED", "1") in {"1","true","True"}
+    # Rolling win-rate window for dynamic entry threshold
+    ENTRY_WINRATE_WINDOW: int = int(os.getenv("ENTRY_WINRATE_WINDOW", "30"))
+    ENTRY_WINRATE_MIN_SAMPLES: int = int(os.getenv("ENTRY_WINRATE_MIN_SAMPLES", "10"))
+    ENTRY_WINRATE_TARGET: float = float(os.getenv("ENTRY_WINRATE_TARGET", "0.75"))
+    # Optional session-based targets (day/night). Enable split to use.
+    ENTRY_SESSION_SPLIT_ENABLED: bool = os.getenv("ENTRY_SESSION_SPLIT_ENABLED", "0") in {"1","true","True"}
+    ENTRY_SESSION_DAY_START_HOUR: int = int(os.getenv("ENTRY_SESSION_DAY_START_HOUR", "9"))
+    ENTRY_SESSION_DAY_END_HOUR: int = int(os.getenv("ENTRY_SESSION_DAY_END_HOUR", "21"))
+    ENTRY_WINRATE_TARGET_DAY: float = float(os.getenv("ENTRY_WINRATE_TARGET_DAY", str(ENTRY_WINRATE_TARGET)))
+    ENTRY_WINRATE_TARGET_NIGHT: float = float(os.getenv("ENTRY_WINRATE_TARGET_NIGHT", str(ENTRY_WINRATE_TARGET)))
+    # Dynamic adjustment step and clamps
+    ENTRY_META_DYNAMIC_STEP: float = float(os.getenv("ENTRY_META_DYNAMIC_STEP", "0.01"))
+    ENTRY_META_DYNAMIC_MIN: float = float(os.getenv("ENTRY_META_DYNAMIC_MIN", "0.85"))
+    ENTRY_META_DYNAMIC_MAX: float = float(os.getenv("ENTRY_META_DYNAMIC_MAX", "0.98"))
+    # Onboarding phase: soften per-symbol adaptation when samples are small
+    ENTRY_META_ONBOARD_SAMPLES: int = int(os.getenv("ENTRY_META_ONBOARD_SAMPLES", str(max(ENTRY_WINRATE_MIN_SAMPLES * 2, 20))))
+    ENTRY_META_ONBOARD_STEP_SCALE: float = float(os.getenv("ENTRY_META_ONBOARD_STEP_SCALE", "0.5"))
+    # Persistence for dynamic thresholds (global and per-symbol)
+    ENTRY_META_STATE_PATH: str = os.getenv(
+        "ENTRY_META_STATE_PATH",
+        str(Path(__file__).resolve().parents[2] / "data" / "entry_meta_state.json"),
+    )
 
 
 

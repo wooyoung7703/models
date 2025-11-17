@@ -24,6 +24,12 @@ from backend.app.trade_manager import TradeManager
 def backtest(days: int = 30) -> Dict[str, Any]:
     symbol = settings.SYMBOL; ex = settings.EXCHANGE_TYPE; itv = settings.INTERVAL
     bt_path = _ROOT / 'backend' / 'data' / 'backtest_tmp_adds.db'
+    # Remove existing to avoid legacy schema with removed columns (e.g., max_adds)
+    try:
+        if bt_path.exists():
+            bt_path.unlink()
+    except Exception:
+        pass
     bt_engine = create_engine(f'sqlite:///{bt_path}', echo=False)
     SQLModel.metadata.create_all(bt_engine)
     with Session(main_engine) as s:
@@ -78,13 +84,11 @@ def backtest(days: int = 30) -> Dict[str, Any]:
             'fills_total': adds_map.get(int(t.id), 0),
             'pnl_pct': t.pnl_pct_snapshot,
         })
-    max_adds = max((t.adds_done for t in closed), default=0)
     summary = {
         'symbol': symbol,
         'interval': itv,
         'days': days,
         'n_closed_trades': len(closed),
-        'max_adds_done': max_adds,
         'trades': stats_trades,
     }
     print('Backtest adds summary')

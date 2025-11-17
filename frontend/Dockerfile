@@ -17,8 +17,9 @@ COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 # Static assets
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Inject runtime API base via small config
+# Inject runtime API base + admin token into a small config
 ARG API_BASE=/api
-RUN echo "window.VITE_API_BASE='${API_BASE}';" > /usr/share/nginx/html/config.js
+ARG WS_ADMIN_TOKEN=""
+RUN printf "window.VITE_API_BASE='%s';\nwindow.VITE_WS_URL='ws://'+(window.location.hostname||'localhost')+':8022';\nwindow.WS_ONLY=true;\nwindow.WS_ADMIN_TOKEN='%s';\n" "${API_BASE}" "${WS_ADMIN_TOKEN}" > /usr/share/nginx/html/config.js
 
 EXPOSE 80

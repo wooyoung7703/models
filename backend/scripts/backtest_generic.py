@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 from typing import Any, Dict
 from datetime import datetime, timedelta
+from collections import deque
 
 _THIS = Path(__file__).resolve()
 _ROOT = _THIS.parents[2]
@@ -44,39 +45,61 @@ def run_backtest(days: int) -> Dict[str, Any]:
         rows = s.exec(select(Candle).where((Candle.symbol==symbol)&(Candle.exchange_type==ex)&(Candle.interval==itv)&(Candle.open_time>=start_dt)&(Candle.open_time<=end_dt)).order_by(Candle.open_time.asc())).all()  # type: ignore[attr-defined]
 
     predictor = RealTimePredictor(symbol=symbol, interval=itv)
-    tm = TradeManager(lambda: Session(bt_engine), leverage=10, add_cooldown_seconds=0)
-    last_fill_time: Dict[int, datetime] = {}
-    cooldown = settings.ADD_COOLDOWN_SECONDS
+    # Use same cooldown logic as live (internal to TradeManager)
+    cooldown = int(settings.ADD_COOLDOWN_SECONDS)
+    tm = TradeManager(lambda: Session(bt_engine), leverage=10, add_cooldown_seconds=cooldown)
+
+    # In backtest, assume feature pipeline is healthy; ignore historical gaps to match live conditions
+    missing24 = 0
+    prev_time: datetime | None = None
 
     for row in rows:
+        # Predict nowcast for this candle
         nc = predictor.predict_from_row(row, price_override=row.close, price_source='closed')
         nc_d = nc.to_dict()
-        # Cooldown gating for adds
-        with Session(bt_engine) as ts:
-            open_trade = ts.exec(select(Trade).where((Trade.symbol==symbol)&(Trade.status=='open')).order_by(Trade.created_at.desc())).first()  # type: ignore[attr-defined]
-        modified_nc = nc_d
-        if open_trade is not None:
-            tid = int(open_trade.id)  # type: ignore[arg-type]
-            last_ts = last_fill_time.get(tid)
-            can_add_now = True
-            if cooldown > 0 and last_ts is not None:
-                elapsed = (row.close_time - last_ts).total_seconds()
-                if elapsed < cooldown:
-                    can_add_now = False
-            if not can_add_now:
-                sblk = dict(modified_nc.get('stacking') or {})
-                sblk['decision'] = False
-                modified_nc = {**modified_nc, 'stacking': sblk}
-        action = tm.process(symbol=symbol, interval=itv, exchange_type=ex, price=row.close, nowcast=modified_nc, features_health=None)
-        if action.get('action') in {'enter','add'}:
+
+        prev_time = row.close_time
+
+        # Build features_health similar to live checks
+        features_health = {
+            'data_fresh_seconds': 0,  # in backtest we evaluate at candle time
+            'missing_minutes_24h': int(missing24),
+            '5m_latest_open_time': True,   # 5m/15m aggregates assumed derivable from 1m during backtest
+            '15m_latest_open_time': True,
+        }
+
+        action = tm.process(symbol=symbol, interval=itv, exchange_type=ex, price=row.close, nowcast=nc_d, features_health=features_health)
+        act = action.get('action')
+        if act in {'enter','add','close'}:
             with Session(bt_engine) as ts:
-                t = ts.exec(select(Trade).where((Trade.symbol==symbol)&(Trade.status=='open')).order_by(Trade.created_at.desc())).first()  # type: ignore[attr-defined]
-                if t is not None and t.id is not None:
-                    last_fill_time[int(t.id)] = row.close_time
-                    f = ts.exec(select(TradeFill).where(TradeFill.trade_id==t.id).order_by(TradeFill.timestamp.desc()).limit(1)).first()  # type: ignore[attr-defined]
-                    if f is not None:
-                        f.timestamp = row.close_time
-                        ts.add(f); ts.commit()
+                # On enter/add, update last fill timestamp to candle close_time
+                if act in {'enter','add'}:
+                    # fetch latest open trade
+                    t = ts.exec(select(Trade).where((Trade.symbol==symbol)&(Trade.status=='open')).order_by(Trade.created_at.desc())).first()  # type: ignore[attr-defined]
+                    if t is not None and t.id is not None:
+                        f = ts.exec(select(TradeFill).where(TradeFill.trade_id==t.id).order_by(TradeFill.timestamp.desc()).limit(1)).first()  # type: ignore[attr-defined]
+                        if f is not None:
+                            f.timestamp = row.close_time
+                            ts.add(f)
+                        if act == 'enter':
+                            # align created_at to candle time
+                            t.created_at = row.close_time
+                            ts.add(t)
+                    ts.commit()
+                elif act == 'close':
+                    # Align closed trade's closed_at to candle time
+                    tid = action.get('trade_id')
+                    if tid is not None:
+                        t = ts.exec(select(Trade).where((Trade.id==tid))).first()  # type: ignore[attr-defined]
+                        if t is not None:
+                            t.closed_at = row.close_time
+                            ts.add(t)
+                            # also align the last fill timestamp if exists
+                            f = ts.exec(select(TradeFill).where(TradeFill.trade_id==t.id).order_by(TradeFill.timestamp.desc()).limit(1)).first()  # type: ignore[attr-defined]
+                            if f is not None:
+                                f.timestamp = row.close_time
+                                ts.add(f)
+                            ts.commit()
 
     summary: Dict[str, Any] = {
         'symbol': symbol,
@@ -113,7 +136,49 @@ def run_backtest(days: int) -> Dict[str, Any]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--days', type=int, default=30, help='Number of past days to backtest')
+    ap.add_argument('--stacking-th', type=float, default=None, help='Override stacking threshold (>=0 to force env, <0 to prefer sidecar/adaptive)')
+    ap.add_argument('--entry-meta-th', type=float, default=None, help='Override entry-meta threshold')
+    ap.add_argument('--adaptive-q', type=float, default=None, help='Override adaptive threshold quantile (e.g., 0.9)')
+    ap.add_argument('--gate', type=int, default=None, help='Override ENTRY_META_GATE_ENABLED (1/0)')
+    ap.add_argument('--no-sl', action='store_true', help='Disable stop loss checks (no SL)')
+    ap.add_argument('--tp-net-pct', type=float, default=None, help='Set TAKE_PROFIT_PCT and evaluate on net-of-fees (e.g., 0.01 for +1% net)')
+    ap.add_argument('--tp-mode', type=str, default=None, choices=['fixed','trailing'], help='Override TP_MODE')
+    ap.add_argument('--reset', action='store_true', help='Reset temp backtest DB before running')
+    ap.add_argument('--enable-entry-meta', type=int, default=None, help='Enable Entry Meta computation (1/0)')
+    ap.add_argument('--entry-meta-path', type=str, default=None, help='Path to entry_meta.json sidecar')
     args = ap.parse_args()
+    # Runtime overrides to mirror requested test conditions
+    from backend.app.core.config import settings
+    if args.stacking_th is not None:
+        settings.STACKING_THRESHOLD = float(args.stacking_th)
+    if args.entry_meta_th is not None:
+        settings.ENTRY_META_THRESHOLD = float(args.entry_meta_th)
+    if args.adaptive_q is not None:
+        settings.ENABLE_ADAPTIVE_THRESHOLD = True
+        settings.ADAPTIVE_THRESHOLD_QUANTILE = float(args.adaptive_q)
+    if args.gate is not None:
+        settings.ENTRY_META_GATE_ENABLED = bool(int(args.gate))
+    if args.no_sl:
+        settings.DISABLE_STOP_LOSS = True
+    if args.tp_net_pct is not None:
+        settings.TAKE_PROFIT_PCT = float(args.tp_net_pct)
+        settings.TP_DECISION_ON_NET = True
+    if args.tp_mode is not None:
+        settings.TP_MODE = str(args.tp_mode)
+    if args.enable_entry_meta is not None:
+        settings.ENABLE_ENTRY_META = bool(int(args.enable_entry_meta))
+    if args.entry_meta_path is not None:
+        settings.ENTRY_META_PATH = str(args.entry_meta_path)
+    # Reset temp DB (delete rows) if requested
+    if args.reset:
+        bt_path = _ROOT / 'backend' / 'data' / 'backtest_tmp_generic.db'
+        bt_url = f"sqlite:///{bt_path}"
+        bt_engine = create_engine(bt_url, echo=False)
+        from sqlalchemy import text
+        with Session(bt_engine) as ts:
+            ts.exec(text("DELETE FROM trade_fills"))
+            ts.exec(text("DELETE FROM trades"))
+            ts.commit()
     run_backtest(args.days)
 
 if __name__ == '__main__':

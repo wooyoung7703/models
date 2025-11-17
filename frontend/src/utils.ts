@@ -8,21 +8,29 @@ const pctFmt = new Intl.NumberFormat('en-US', {
 
 export const formatPct = (p?: number) => {
   if (p == null || isNaN(p)) return 'n/a'
+  const v = p
+  // Extremely small but positive values: show a floor indicator
+  if (v > 0 && v < 0.001) return '<0.1%'
+  // Sub-1% values: increase precision to two decimals
+  if (v < 0.01) return `${(v * 100).toFixed(2)}%`
   try {
-    return pctFmt.format(p)
+    return pctFmt.format(v)
   } catch {
-    return `${(p * 100).toFixed(1)}%`
+    return `${(v * 100).toFixed(1)}%`
   }
 }
 
 export const formatSignedPct = (p?: number | null) => {
   if (p == null || isNaN(Number(p))) return 'n/a'
-  const v = Number(p)
-  const sign = v > 0 ? '+' : v < 0 ? '-' : ''
+  const raw = Number(p)
+  const sign = raw > 0 ? '+' : raw < 0 ? '-' : ''
+  const v = Math.abs(raw)
+  if (v > 0 && v < 0.001) return `${sign}<0.1%`
+  if (v < 0.01) return `${sign}${(v * 100).toFixed(2)}%`
   try {
-    return `${sign}${pctFmt.format(Math.abs(v))}`
+    return `${sign}${pctFmt.format(v)}`
   } catch {
-    return `${sign}${(Math.abs(v) * 100).toFixed(1)}%`
+    return `${sign}${(v * 100).toFixed(1)}%`
   }
 }
 

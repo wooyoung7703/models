@@ -1,37 +1,3 @@
-FROM python:3.11-slim AS base
-
-# System deps for scientific libs (xgboost/lightgbm use OpenMP)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       build-essential \
-       gcc \
-       g++ \
-       libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-WORKDIR /app
-
-# Install Python dependencies first for better layer caching
-COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --upgrade pip \
-    && pip install -r backend/requirements.txt
-
-# Copy application code
-COPY backend/ ./backend/
-
-# Expose API port
-EXPOSE 8000
-
-# Default environment (override in compose as needed)
-ENV LOG_LEVEL=INFO
-
-# Start FastAPI via uvicorn
-CMD ["python", "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-# Backend Dockerfile
 FROM python:3.11-slim AS backend
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -46,12 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install python deps first (better layer caching)
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Copy backend app code
 COPY backend /app/backend
+# Include root-level scripts (analysis & meta retrain utilities)
+COPY scripts /app/scripts
+# Include root-level data (evaluation samples & meta JSON if present)
+COPY data /app/data
+# Duplicate BVF meta JSON into backend/data for env overrides pointing there
+# Note: evaluation sample CSV is not required at runtime, so we no longer copy it.
+RUN cp /app/data/bottom_vs_forecast_meta.json /app/backend/data/ 2>/dev/null || true
 
 # Create data directory
 RUN mkdir -p /app/backend/data
@@ -65,5 +36,8 @@ ENV EXCHANGE_TYPE=futures \
     GAP_FILL_ENABLED=1 \
     PREDICT_ENABLED=1
 
-# Run uvicorn
-CMD ["python", "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8022"]
+# Run standalone WebSocket server (no FastAPI)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -m backend.app.healthcheck || exit 1
+
+CMD ["python", "-m", "backend.app.ws_server"]

@@ -146,7 +146,6 @@ class Trade(SQLModel, table=True):
     avg_price: float
     quantity: float = Field(default=0.0)  # total base qty
 
-    max_adds: int = Field(default=1000)  # effectively unlimited adds for stress test
     adds_done: int = Field(default=0)
 
     take_profit_pct: float = Field(default=0.01)   # +1%

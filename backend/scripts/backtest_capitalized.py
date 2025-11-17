@@ -270,7 +270,6 @@ def backtest(days: int, initial_notional: float, add_notional: float, leverage: 
 
     # Summary
     avg_adds = float(sum(adds_hist)/len(adds_hist)) if adds_hist else 0.0
-    max_adds = max(adds_hist) if adds_hist else 0
     # Net = realized PnL - all fees
     net_pnl_usdt = realized_pnl_total - fees_total
     max_trade_net = max(trade_net_pnls) if trade_net_pnls else 0.0
@@ -298,7 +297,6 @@ def backtest(days: int, initial_notional: float, add_notional: float, leverage: 
         'wins': wins,
         'losses': losses,
         'avg_adds_per_trade': avg_adds,
-        'max_adds_per_trade': max_adds,
         'net_pnl_usdt': round(net_pnl_usdt, 2),
         'net_return_pct_on_1k': round(100.0 * (net_pnl_usdt / equity_start), 2),
         'max_trade_net_pnl_usdt': round(max_trade_net, 2),

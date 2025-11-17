@@ -1,0 +1,5 @@
+python-dotenv==1.0.0
+sqlmodel==0.0.14
+websockets==11.0.3
+python-json-logger==2.0.7
+APScheduler==3.11.1

@@ -28,10 +28,10 @@ class EntryConfig:
 
 
 class TradeManager:
-    """Simple long-only manager with DCA up to max_adds and TP/SL.
+    """Simple long-only manager with unlimited DCA (cooldown + price drop).
 
     - Opens trade when entry conditions satisfied
-    - Adds only if current price < last fill price and adds_done < max_adds
+    - Adds only if current price < last fill price and cooldown passed
     - Closes when price crosses TP/SL relative to avg_price
     - Leverage is informational here; TP/SL are on underlying move (e.g., +1%, -0.5%)
     """
@@ -50,7 +50,20 @@ class TradeManager:
         s = (nowcast or {}).get('stacking') or {}
         if not s.get('ready'):
             return False
+        # Stacking decision is base requirement
         if not s.get('decision'):
+            return False
+        # Optional precision gate via entry_meta
+        try:
+            from .core.config import settings as _s
+            if getattr(_s, 'ENTRY_META_GATE_ENABLED', True):
+                em = s.get('entry_meta') if isinstance(s, dict) else None
+                if em is None or not isinstance(em, dict):
+                    return False  # require meta block present
+                if not em.get('entry_decision'):
+                    return False
+        except Exception:
+            # Fail safe: treat as not passing if config resolution fails
             return False
         # Optional: still enforce basic data freshness/gap checks if provided.
         cfg = EntryConfig()
@@ -88,9 +101,6 @@ class TradeManager:
             t.take_profit_pct = tp_pct
             if sl_pct is not None:
                 t.stop_loss_pct = float(sl_pct)
-            # Max adds default
-            max_adds = int(getattr(settings, 'MAX_ADDS', t.max_adds))
-            t.max_adds = max(0, max_adds)
             # Initialize trailing state for this trade id
             # Config is read from settings during evaluation
         except Exception:
@@ -106,11 +116,8 @@ class TradeManager:
         return t
 
     def _add_fill(self, session: Session, trade: Trade, price: float):
-        if trade.adds_done >= trade.max_adds:
-            return
-        if price >= trade.avg_price:  # only average down on lower price
-            return
-        # add 1 unit
+        # Unlimited adds; cooldown + last-fill price rule only
+        # Removed avg_price check: allow add as long as below last fill
         new_qty = trade.quantity + 1.0
         trade.avg_price = (trade.avg_price * trade.quantity + price) / new_qty
         trade.quantity = new_qty
@@ -131,11 +138,23 @@ class TradeManager:
             return False
         move = (price / trade.avg_price) - 1.0
         trade.last_price = price
+        # For decision thresholds, default to gross move; net-of-fees computed below
         trade.pnl_pct_snapshot = move
-        # Stop loss (always gross move)
-        if move <= trade.stop_loss_pct:
+
+        # Pre-compute net-of-fees move estimate
+        try:
+            fee_in = float(getattr(settings, 'FEE_ENTRY_PCT', 0.0))
+            fee_out = float(getattr(settings, 'FEE_EXIT_PCT', 0.0))
+            net_move = move - fee_in - fee_out * (price / trade.avg_price)
+        except Exception:
+            net_move = move
+
+        # Stop loss (skip if disabled)
+        if not bool(getattr(settings, 'DISABLE_STOP_LOSS', False)) and (move <= trade.stop_loss_pct):
             trade.status = 'closed'
             trade.closed_at = datetime.utcnow()
+            # snapshot net-of-fees pnl
+            trade.pnl_pct_snapshot = net_move
             # cleanup trail
             try:
                 tid = int(trade.id)  # type: ignore[arg-type]
@@ -165,6 +184,7 @@ class TradeManager:
                 if move <= (prev_floor - giveback):
                     trade.status = 'closed'
                     trade.closed_at = datetime.utcnow()
+                    trade.pnl_pct_snapshot = net_move
                     # cleanup trail
                     try:
                         self._trail_state.pop(tid, None)
@@ -172,9 +192,12 @@ class TradeManager:
                         pass
                     return True
         else:
-            if move >= trade.take_profit_pct:
+            use_net = bool(getattr(settings, 'TP_DECISION_ON_NET', False))
+            decision_move = net_move if use_net else move
+            if decision_move >= trade.take_profit_pct:
                 trade.status = 'closed'
                 trade.closed_at = datetime.utcnow()
+                trade.pnl_pct_snapshot = net_move
                 try:
                     tid = int(trade.id)  # type: ignore[arg-type]
                     self._trail_state.pop(tid, None)
@@ -210,8 +233,18 @@ class TradeManager:
                     return action
                 # DCA add if price lower and adds remain and signal still ON and cooldown passed
                 s = (nowcast or {}).get('stacking') or {}
-                # Reverted: add only when stacking.decision == True (pure threshold condition)
-                if s.get('decision') and trade.adds_done < trade.max_adds and price < trade.avg_price:
+                # Restored: require stacking.decision plus (if enabled) entry_meta.entry_decision for adds.
+                can_add_signal = bool(s.get('decision'))
+                try:
+                    from .core.config import settings as _s
+                    if getattr(_s, 'ENTRY_META_GATE_ENABLED', True):
+                        em = s.get('entry_meta') if isinstance(s, dict) else None
+                        if not (isinstance(em, dict) and em.get('entry_decision')):
+                            can_add_signal = False
+                except Exception:
+                    can_add_signal = False
+                # Removed avg_price gate; rely on last fill price strictly below check
+                if can_add_signal:
                     can_add = True
                     if self.add_cooldown_seconds > 0:
                         last_fill = self._last_fill_time(session, trade)

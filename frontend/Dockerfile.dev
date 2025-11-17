@@ -1,0 +1,14 @@
+FROM node:20-alpine
+WORKDIR /app
+
+# Install deps
+COPY frontend/package*.json ./
+RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+# Copy all files for dev mode
+COPY frontend/ ./
+
+EXPOSE 5173
+
+# Run Vite dev server with HMR
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

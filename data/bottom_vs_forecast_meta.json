@@ -1,0 +1,15 @@
+{
+  "features": [
+    "bottom_prob",
+    "room_to_forecast_min",
+    "rel_to_forecast_mean",
+    "forecast_expected_return"
+  ],
+  "coef": [
+    11.661765611368143,
+    0.007634939171657066,
+    0.000898566378025708,
+    -0.0008996137728356345
+  ],
+  "intercept": -6.651060988145261
+}

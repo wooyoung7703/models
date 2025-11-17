@@ -1,0 +1,12 @@
+{
+  "features": [
+    "p_use",
+    "margin",
+    "room_to_forecast_min",
+    "rel_to_forecast_mean",
+    "forecast_expected_return"
+  ],
+  "coef": [6.0, 1.0, 0.0, 0.0, 0.0],
+  "intercept": -5.0,
+  "threshold": 0.6
+}

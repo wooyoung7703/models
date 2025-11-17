@@ -47,7 +47,7 @@ def _parse_list_ints(v: str) -> List[int]:
 
 cols = (
     'quantile', 'cooldown_seconds', 'n_trades_closed', 'wins', 'losses',
-    'avg_adds_per_trade', 'max_adds_per_trade', 'net_pnl_usdt', 'net_return_pct_on_1k'
+    'avg_adds_per_trade', 'net_pnl_usdt', 'net_return_pct_on_1k'
 )
 
 

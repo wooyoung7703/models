@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "model_order": [
+    "lstm",
+    "tf",
+    "xgb"
+  ],
+  "ensemble": "bayes",
+  "created_at_utc": "2025-11-15T01:27:56Z",
+  "quick_refit": true,
+  "effective_days": 30,
+  "label_schema_version": "bottom_v1",
+  "oof_folds": 0,
+  "bagging_n": 1,
+  "bayes_alpha": 1.0,
+  "use_ordinal": false,
+  "interval": "1m",
+  "seq_len": 30,
+  "val_ratio": 0.2,
+  "data_source": "real",
+  "feature_set_alias": "",
+  "feature_subset_len": 0,
+  "bayes_weights": {
+    "lstm": 0.28126242756843567,
+    "tf": 0.3097964823246002,
+    "xgb": 0.4089410901069641
+  }
+}

@@ -66,28 +66,41 @@ class BinanceCollector:
             url = _ws_url()
             try:
                 log.info("Connecting to %s", url)
-                async with connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    backoff = settings.RECONNECT_MIN_SEC
-                    async for message in ws:
-                        if self._stop.is_set():
-                            break
-                        data = json.loads(message)
-                        k = data.get("k") or data.get("data", {}).get("k")
-                        if not k:
-                            continue
-                        is_closed = k.get("x", False)
-                        # Always capture live price from in-progress candles
-                        try:
-                            sym = (k.get("s") or settings.SYMBOL).lower()
-                            live_c = float(k.get("c")) if k.get("c") is not None else None
-                            if live_c is not None:
-                                self.live_prices[sym] = live_c
-                        except Exception:
-                            pass
-                        if not is_closed:
-                            # Skip persisting until candle closes
-                            continue
-                        await self._handle_kline(k)
+                # Explicit open timeout (DNS/socket) so we can distinguish and log clearly
+                try:
+                    async with connect(url, ping_interval=20, ping_timeout=20, open_timeout=settings.WS_OPEN_TIMEOUT_SECONDS) as ws:
+                        log.info("Connected to %s", url)
+                        backoff = settings.RECONNECT_MIN_SEC
+                        async for message in ws:
+                            if self._stop.is_set():
+                                break
+                            data = json.loads(message)
+                            k = data.get("k") or data.get("data", {}).get("k")
+                            if not k:
+                                continue
+                            is_closed = k.get("x", False)
+                            # Always capture live price from in-progress candles
+                            try:
+                                sym = (k.get("s") or settings.SYMBOL).lower()
+                                live_c = float(k.get("c")) if k.get("c") is not None else None
+                                if live_c is not None:
+                                    self.live_prices[sym] = live_c
+                            except Exception:
+                                pass
+                            if not is_closed:
+                                # Skip persisting until candle closes
+                                continue
+                            await self._handle_kline(k)
+                    # loop ended (server closed or break)
+                    log.warning("Websocket stream ended for %s", url)
+                except asyncio.TimeoutError as te:
+                    # Connection open timed out (DNS or network). Short log + adaptive backoff.
+                    import time
+                    now_ts = time.time()
+                    log.warning("Websocket open timeout (%ss) for %s: %s", settings.WS_OPEN_TIMEOUT_SECONDS, url, te)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, settings.RECONNECT_MAX_SEC)
+                    continue
             except asyncio.CancelledError:
                 # Graceful shutdown requested; exit loop without escalating
                 log.info("Collector task cancelled; exiting websocket loop")
@@ -164,6 +177,7 @@ class BinanceCollector:
         with Session(engine) as session:
             try:
                 self._upsert_candle(session, candle)
+                log.info("Saved closed candle %s %s @ %s close=%s", symbol, settings.INTERVAL, open_time.isoformat(), close)
             except Exception as e:
                 log.warning("DB upsert failure: %s", e)
                 _try_alert(f"DB upsert failed: {e}")
@@ -183,7 +197,12 @@ class BinanceCollector:
         # Update sequence buffer (after commit) for sequence models
         try:
             buf = get_buffer(symbol)
-            buf.append(extract_vector_from_candle(candle))
+            vec = extract_vector_from_candle(candle)
+            buf.append(vec)
+            try:
+                log.debug("seq_buffer append %s len=%d vector_sample=%s", symbol, len(buf), [round(v,4) for v in vec[:5]])
+            except Exception:
+                pass
         except Exception:
             log.exception("Failed to append to sequence buffer for %s", symbol)
 

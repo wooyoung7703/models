@@ -1,0 +1,59 @@
+{
+  "methods_requested": [
+    "logistic",
+    "bayes"
+  ],
+  "results": [
+    {
+      "method": "logistic",
+      "duration_sec": 84.14786458015442,
+      "best_threshold_precision": 0.936271186440678,
+      "precision_at_best_t": 0.6569767441860465,
+      "coverage_at_best_t": 0.020261514901637412,
+      "precision_high": 0.0,
+      "precision_low": 0.4224965706447188,
+      "metrics_precision": 0.4224965706447188,
+      "metrics_recall": 0.9404580152671755,
+      "metrics_f1": 0.5830572645527686
+    },
+    {
+      "method": "bayes",
+      "duration_sec": 77.45355606079102,
+      "best_threshold_precision": 0.7600847457627118,
+      "precision_at_best_t": 0.6557377049180327,
+      "coverage_at_best_t": 0.007185769819766757,
+      "precision_high": 0.0,
+      "precision_low": 0.4238456237077877,
+      "metrics_precision": 0.4238456237077877,
+      "metrics_recall": 0.9389312977099237,
+      "metrics_f1": 0.584045584045584
+    }
+  ],
+  "ranked": [
+    {
+      "method": "logistic",
+      "duration_sec": 84.14786458015442,
+      "best_threshold_precision": 0.936271186440678,
+      "precision_at_best_t": 0.6569767441860465,
+      "coverage_at_best_t": 0.020261514901637412,
+      "precision_high": 0.0,
+      "precision_low": 0.4224965706447188,
+      "metrics_precision": 0.4224965706447188,
+      "metrics_recall": 0.9404580152671755,
+      "metrics_f1": 0.5830572645527686
+    },
+    {
+      "method": "bayes",
+      "duration_sec": 77.45355606079102,
+      "best_threshold_precision": 0.7600847457627118,
+      "precision_at_best_t": 0.6557377049180327,
+      "coverage_at_best_t": 0.007185769819766757,
+      "precision_high": 0.0,
+      "precision_low": 0.4238456237077877,
+      "metrics_precision": 0.4238456237077877,
+      "metrics_recall": 0.9389312977099237,
+      "metrics_f1": 0.584045584045584
+    }
+  ],
+  "primary_sort": "precision_at_best_t desc, coverage_at_best_t desc"
+}

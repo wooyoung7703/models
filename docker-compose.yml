@@ -1,19 +1,69 @@
-version: "3.9"
 services:
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     container_name: models-backend
+    env_file:
+      - .env
     environment:
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=DEBUG
       - DISABLE_BACKGROUND_LOOPS=0
+      - LIGHT_MODE=0
+      - WS_PORT=8022
+      - SEQ_MIN_READY=3
+      # --- Meta retrain & monitoring settings ---
+      - META_RETRAIN_ENABLED=1
+      - META_RETRAIN_DAILY_AT=03:15
+      - META_RETRAIN_MIN_INTERVAL_MINUTES=60
+      - META_RETRAIN_MIN_REL_BRIER_IMPROVE=0.005
+      - META_NEG_STREAK_WARN=3
+      - META_BACKOFF_FACTOR=0.5
+      - META_NEG_STREAK_ROLLBACK=1
+      - META_COEF_DRIFT_WARN_COS=0.92
+      - META_REG_WINDOW=30
+      - META_REG_USE_NORMAL_APPROX=1
+      # Paths (inside container)
+      - BOTTOM_VS_FORECAST_EVAL_CSV_PATH=/app/data/bottom_eval_sample.csv
+      - BOTTOM_VS_FORECAST_META_PATH=/app/backend/data/bottom_vs_forecast_meta.json
+      - META_LAST_GOOD_META_PATH=/app/backend/data/bottom_vs_forecast_meta_last_good.json
+      - META_RETRAIN_HISTORY_PATH=/app/backend/data/bvf_meta_retrain_history.json
       # Optional runtime override; uncomment to force a method
       # - STACKING_OVERRIDE_METHOD=bayes
     volumes:
-      - ./backend/data:/app/backend/data
+      - backend-data:/app/backend/data
     ports:
-      - "8000:8000"
+      - "8022:8022"
+    restart: unless-stopped
+
+  trainer:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: models-trainer
+    command: ["python", "-m", "backend.app.train_loop"]
+    environment:
+      - TRAIN_INTERVAL_SECONDS=3600
+      # 학습 윈도우는 BOTTOM_TRAIN_DAYS / STACKING_META_DAYS 로 통일
+      - BOTTOM_TRAIN_DAYS=30
+      - STACKING_META_DAYS=45
+      - TRAIN_LOG_LEVEL=INFO
+      - DISABLE_BACKGROUND_LOOPS=1
+      - LIGHT_MODE=1
+      # Broadcast consistency (trainer may read meta settings if extended later)
+      - BOTTOM_VS_FORECAST_META_PATH=/app/data/bottom_vs_forecast_meta.json
+      - META_RETRAIN_HISTORY_PATH=/app/data/bvf_meta_retrain_history.json
+      - BOTTOM_VS_FORECAST_META_PATH=/app/backend/data/bottom_vs_forecast_meta.json
+    volumes:
+      - backend-data:/app/backend/data
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-m", "backend.app.healthcheck_trainer"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
 
   frontend:
@@ -22,9 +72,11 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         API_BASE: /api
+        WS_ADMIN_TOKEN: ${WS_ADMIN_TOKEN}
     container_name: models-frontend
     depends_on:
       - backend
+      - trainer
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -33,3 +85,7 @@ networks:
   default:
     name: models-net
     driver: bridge
+
+volumes:
+  backend-data:
+    name: models-backend-data

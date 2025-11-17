@@ -38,7 +38,7 @@ def _parse_grid(val: str) -> List[float]:
 
 essential_columns = (
     'tp', 'sl', 'n_trades_closed', 'wins', 'losses',
-    'avg_adds_per_trade', 'max_adds_per_trade', 'net_pnl_usdt', 'net_return_pct_on_1k'
+    'avg_adds_per_trade', 'net_pnl_usdt', 'net_return_pct_on_1k'
 )
 
 
@@ -91,7 +91,6 @@ def main():
             'wins': best.get('wins'),
             'losses': best.get('losses'),
             'avg_adds_per_trade': best.get('avg_adds_per_trade'),
-            'max_adds_per_trade': best.get('max_adds_per_trade'),
         })
 
 
