@@ -86,7 +86,13 @@
             :active-signals="topNowcasts.length"
             :ws-connected="wsConnected"
           />
-          <NotificationCenter :items="recentNotifications" @dismiss="dismissNotification" />
+          <NotificationPanel
+            :items="notificationPanelItems"
+            :source="notificationSource"
+            :ws-connected="wsConnected"
+            @update:source="handleNotificationSource"
+            @dismiss="dismissNotification"
+          />
         </div>
 
         <div class="panel panel-transparent">
@@ -96,6 +102,15 @@
             @inspect="handleInspectSymbol"
           />
           <p class="muted chart-interval-hint">차트 간격 · {{ chartInterval }}</p>
+        </div>
+
+        <div class="panel">
+          <SymbolBoard
+            :nowcasts="nowcasts"
+            :feature-health="features"
+            :selected-symbol="chartSymbol"
+            @select="handleSymbolBoardSelect"
+          />
         </div>
       </section>
 
@@ -175,7 +190,7 @@ import { computed, ref, watch } from 'vue'
 // @ts-ignore script-setup default export shim
 import TradeSignalPanel from './components/TradeSignalPanel.vue'
 // @ts-ignore script-setup default export shim
-import NotificationCenter from './components/NotificationCenter.vue'
+import NotificationPanel from './components/NotificationCenter.vue'
 // @ts-ignore script-setup default export shim
 import TopSignalsPanel from './components/TopSignalsPanel.vue'
 // @ts-ignore script-setup default export shim
@@ -186,6 +201,8 @@ import SystemHealthStrip from './components/SystemHealthStrip.vue'
 import StackingMetaCard from './components/StackingMetaCard.vue'
 // @ts-ignore script-setup default export shim
 import EntryMetaCard from './components/EntryMetaCard.vue'
+// @ts-ignore script-setup default export shim
+import SymbolBoard from './components/SymbolBoard.vue'
 // @ts-ignore script-setup default export shim
 import ChartView from './components/views/ChartView.vue'
 // @ts-ignore script-setup default export shim
@@ -288,8 +305,9 @@ const chartSignals = computed<ChartSignal[]>(() => {
     })
   return sortSignalsByTime(derived).slice(-chartSignalLimit)
 })
-const recentNotifications = computed(() => notifications.value.slice(0, 4))
+const notificationPanelItems = computed(() => notifications.value.slice(0, 8))
 const trayNotifications = computed(() => notifications.value.slice(0, 6))
+const notificationSource = ref<'all' | 'system' | 'ws' | 'admin'>('all')
 const trainingProgress = computed(() => {
   if (!trainingStatus.value) return 'idle'
   if (trainingStatus.value.pending_meta_retrain) return 'meta pending'
@@ -374,12 +392,25 @@ function handleInspectSymbol(symbol: string) {
   activeTab.value = 'chart'
 }
 
+function handleSymbolBoardSelect(symbol: string) {
+  if (!symbol) return
+  chartSymbol.value = symbol
+}
+
 function handleChartInterval(value: string) {
   chartInterval.value = value
 }
 
 function handlePollIntervalChange(value: number) {
   setPollIntervalSeconds(value)
+}
+
+function handleNotificationSource(value: string) {
+  if (value === 'all' || value === 'system' || value === 'ws' || value === 'admin') {
+    notificationSource.value = value
+    return
+  }
+  notificationSource.value = 'all'
 }
 
 function normalizeChartSignal(

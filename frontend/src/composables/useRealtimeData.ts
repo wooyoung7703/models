@@ -73,12 +73,17 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
 
   const autoStart = options.autoStart !== false && !!getCurrentInstance()
 
-  function pushNotification(message: string, level: UiNotification['level'] = 'info') {
+  function pushNotification(
+    message: string,
+    level: UiNotification['level'] = 'info',
+    source: UiNotification['source'] = 'system'
+  ) {
     const entry: UiNotification = {
       id: ++notificationSeq,
       ts: new Date().toISOString(),
       level,
       message,
+      source,
     }
     notifications.value = [entry, ...notifications.value].slice(0, MAX_NOTIFICATIONS)
   }
@@ -132,11 +137,11 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
     const action = payload.action || 'command'
     if (payload.ok) {
       adminAck.value = `WS: ${action} 완료`
-      pushNotification(`Admin ${action} succeeded`, 'info')
+      pushNotification(`Admin ${action} succeeded`, 'info', 'admin')
     } else {
       const msg = payload.error ? `${action} 실패 · ${payload.error}` : `${action} 실패`
       adminAck.value = `WS: ${msg}`
-      pushNotification(msg, 'warn')
+      pushNotification(msg, 'warn', 'admin')
     }
   }
 
@@ -201,7 +206,7 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
       ws = new WebSocket(url)
     } catch (err) {
       scheduleReconnect()
-      pushNotification('WebSocket 초기화 실패', 'warn')
+      pushNotification('WebSocket 초기화 실패', 'warn', 'ws')
       return
     }
 
@@ -209,18 +214,18 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
     ws.onopen = () => {
       wsConnected.value = true
       wsConnectedSince.value = Date.now()
-      pushNotification('WS 연결됨')
+      pushNotification('WS 연결됨', 'info', 'ws')
       stopPollingLoops()
     }
     ws.onmessage = handleWsMessage
     ws.onerror = () => {
-      pushNotification('WS 에러 감지 · HTTP 폴백 유지', 'warn')
+      pushNotification('WS 에러 감지 · HTTP 폴백 유지', 'warn', 'ws')
     }
     ws.onclose = () => {
       wsConnected.value = false
       wsConnectedSince.value = null
       if (!destroying) {
-        pushNotification('WS 해제 · 폴백 시작', 'warn')
+        pushNotification('WS 해제 · 폴백 시작', 'warn', 'ws')
         if (!options.wsOnly) startPollingLoops()
         scheduleReconnect()
       }
@@ -422,11 +427,11 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
       const payload = { type: 'admin', action, token: token || (window as any).WS_ADMIN_TOKEN || '' }
       ws.send(JSON.stringify(payload))
       adminAck.value = `WS: ${action} 전송`
-      pushNotification(`Admin ${action} 전송`, 'info')
+      pushNotification(`Admin ${action} 전송`, 'info', 'admin')
     } catch (err) {
       const msg = (err as Error).message || 'admin send failed'
       adminAck.value = `WS: ${msg}`
-      pushNotification(msg, 'warn')
+      pushNotification(msg, 'warn', 'admin')
     }
   }
 

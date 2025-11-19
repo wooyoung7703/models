@@ -11,6 +11,7 @@ export interface UiNotification {
   ts: string
   level: NotificationLevel
   message: string
+  source?: 'system' | 'ws' | 'admin' | 'trade' | 'features' | string
 }
 
 export interface LayoutPreset {
