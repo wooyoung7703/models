@@ -64,19 +64,12 @@
           <NotificationCenter :items="recentNotifications" @dismiss="dismissNotification" />
         </div>
 
-        <div class="panel">
-          <header>
-            <h3>상위 시그널 미리보기</h3>
-            <small class="muted">추후 전용 컴포넌트로 분리 예정</small>
-          </header>
-          <ul class="preview-list">
-            <li v-for="entry in topNowcasts" :key="entry.symbol">
-              <span class="symbol">{{ entry.symbol }}</span>
-              <span class="value">{{ entry.score.toFixed(3) }}</span>
-              <span class="muted">{{ entry.posture }}</span>
-            </li>
-            <li v-if="!topNowcasts.length" class="muted">데이터 수신 대기중…</li>
-          </ul>
+        <div class="panel panel-transparent">
+          <TopSignalsPanel
+            :entries="topNowcasts"
+            :selected-symbol="chartSymbol"
+            @inspect="handleInspectSymbol"
+          />
         </div>
       </section>
 
@@ -156,6 +149,8 @@ import { computed, ref, watch } from 'vue'
 import TradeSignalPanel from './components/TradeSignalPanel.vue'
 // @ts-ignore script-setup default export shim
 import NotificationCenter from './components/NotificationCenter.vue'
+// @ts-ignore script-setup default export shim
+import TopSignalsPanel from './components/TopSignalsPanel.vue'
 // @ts-ignore script-setup default export shim
 import ChartView from './components/views/ChartView.vue'
 // @ts-ignore script-setup default export shim
@@ -318,6 +313,12 @@ function dismissNotification(id: number) {
   notifications.value = notifications.value.filter((note) => note.id !== id)
 }
 
+function handleInspectSymbol(symbol: string) {
+  if (!symbol) return
+  chartSymbol.value = symbol
+  activeTab.value = 'chart'
+}
+
 function normalizeChartSignal(
   entry: ChartSignal | Record<string, any>,
   fallbackId: string
@@ -455,6 +456,12 @@ function tradeToChartSignal(trade: TradeRow): ChartSignal | null {
   border: 1px solid #1f2933;
   border-radius: 12px;
   padding: 16px;
+}
+
+.panel.panel-transparent {
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 
 .panel.primary {
