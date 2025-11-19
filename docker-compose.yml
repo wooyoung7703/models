@@ -42,6 +42,8 @@ services:
       dockerfile: backend/Dockerfile
     container_name: models-trainer
     command: ["python", "-m", "backend.app.train_loop"]
+    env_file:
+      - .env
     environment:
       - TRAIN_INTERVAL_SECONDS=3600
       # 학습 윈도우는 BOTTOM_TRAIN_DAYS / STACKING_META_DAYS 로 통일

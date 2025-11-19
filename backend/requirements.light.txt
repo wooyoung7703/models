@@ -1,4 +1,5 @@
 python-dotenv==1.0.0
+pydantic-settings>=2.2.1
 sqlmodel==0.0.14
 websockets==11.0.3
 python-json-logger==2.0.7

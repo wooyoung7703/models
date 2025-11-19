@@ -1,25 +1,42 @@
-version: "3.9"
 services:
   backend:
-    environment:
-      - LOG_LEVEL=DEBUG
-      # Enable background loops (collector/resampler/predictor) for real-time data.
-      # Set to 1 to disable them during fast unit tests.
-      - DISABLE_BACKGROUND_LOOPS=0
-    # Mount source for fast iteration
+    env_file:
+      - .env
+    command:
+      - watchfiles
+      - --ignore-paths
+      - /app/backend/data
+      - --ignore-paths
+      - /app/backend/app/__pycache__
+      - --ignore-paths
+      - /app/backend/app/training/models
+      - "python -m backend.app.ws_server"
+      - /app/backend/app
     volumes:
       - ./backend:/app/backend
-      - ./backend/data:/app/backend/data
-    # Enable auto-reload in dev
-    command: [
-      "python",
-      "-m",
-      "uvicorn",
-      "backend.app.main:app",
-      "--host","0.0.0.0",
-      "--port","8000",
-      "--reload"
-    ]
+      - ./data:/app/data
 
-  # Frontend dev is served by the same Nginx image as prod.
-  # Edit code locally, then rebuild `models-frontend` via `docker compose build frontend` when needed.
+  trainer:
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+
+  frontend:
+    build: null
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    environment:
+      - VITE_WS_URL=ws://localhost:8022
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  frontend-node-modules:

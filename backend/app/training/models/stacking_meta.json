@@ -6,9 +6,9 @@
     "xgb"
   ],
   "ensemble": "logistic",
-  "created_at_utc": "2025-11-15T01:26:39Z",
-  "quick_refit": true,
-  "effective_days": 30,
+  "created_at_utc": "2025-11-19T15:52:42Z",
+  "quick_refit": false,
+  "effective_days": 45,
   "label_schema_version": "bottom_v1",
   "oof_folds": 0,
   "bagging_n": 1,
@@ -18,12 +18,12 @@
   "seq_len": 30,
   "val_ratio": 0.2,
   "data_source": "real",
-  "feature_set_alias": "",
-  "feature_subset_len": 0,
+  "feature_set_alias": "16",
+  "feature_subset_len": 16,
   "coef": [
-    2.7479944298220325,
-    -0.3097736954157805,
-    6.197875382452946
+    6.36695676705352e-05,
+    7.920710756067584e-05,
+    3.6476979642854817
   ],
-  "intercept": -4.308735127272661
+  "intercept": -0.750406799651275
 }

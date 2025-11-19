@@ -1,6 +1,12 @@
-from collections import deque
-from typing import Deque, Optional, Dict
+import argparse
 import math
+import statistics
+import time
+from collections import deque
+from typing import Deque, Optional, Dict, Iterable
+
+from .core.config import settings
+from .features_fast import FAST_FEATURE_KEYS, compute_fast_features
 
 
 class FeatureCalculator:
@@ -10,7 +16,7 @@ class FeatureCalculator:
     precomputed features to store with the candle.
     """
 
-    def __init__(self):
+    def __init__(self, use_fast_features: Optional[bool] = None):
         self.closes: Deque[float] = deque(maxlen=400)
         self.opens: Deque[float] = deque(maxlen=400)
         self.highs: Deque[float] = deque(maxlen=400)
@@ -39,6 +45,9 @@ class FeatureCalculator:
         # Close z-score tracking
         self.close_window_20: Deque[float] = deque(maxlen=20)
         # Historical closes for ROC / MACD already in closes
+        self.use_fast_features = (
+            settings.FAST_FEATURES_ENABLED if use_fast_features is None else use_fast_features
+        )
 
     def update(self, open_: float, high: float, low: float, close: float, volume: float = 0.0) -> Dict[str, float]:
         features: Dict[str, float] = {}
@@ -58,29 +67,42 @@ class FeatureCalculator:
             ret = 0.0
         self.prev_close = close
 
-        # Rolling returns windows
-        def rolling_ret(n: int) -> Optional[float]:
-            if len(self.closes) >= n:
-                first = self.closes[-n]
-                last = self.closes[-1]
-                if first != 0:
-                    return (last - first) / first
-            return None
-
         features["ret_1"] = ret
-        features["ret_5"] = rolling_ret(5) or 0.0
-        features["ret_15"] = rolling_ret(15) or 0.0
 
-        # MA
-        def sma(n: int) -> Optional[float]:
-            if len(self.closes) >= n:
-                return sum(list(self.closes)[-n:]) / n
-            return None
+        if self.use_fast_features:
+            fast_features = compute_fast_features(
+                closes=self.closes,
+                highs=self.highs,
+                lows=self.lows,
+                volumes=self.volumes,
+                returns=self.returns,
+                close=close,
+                volume=volume,
+            )
+            features.update(fast_features)
+        else:
+            # Rolling returns windows
+            def rolling_ret(n: int) -> Optional[float]:
+                if len(self.closes) >= n:
+                    first = self.closes[-n]
+                    last = self.closes[-1]
+                    if first != 0:
+                        return (last - first) / first
+                return None
 
-        features["ma_5"] = sma(5) or 0.0
-        features["ma_20"] = sma(20) or 0.0
-        features["ma_50"] = sma(50) or 0.0
-        features["ma_200"] = sma(200) or 0.0
+            features["ret_5"] = rolling_ret(5) or 0.0
+            features["ret_15"] = rolling_ret(15) or 0.0
+
+            # MA
+            def sma(n: int) -> Optional[float]:
+                if len(self.closes) >= n:
+                    return sum(list(self.closes)[-n:]) / n
+                return None
+
+            features["ma_5"] = sma(5) or 0.0
+            features["ma_20"] = sma(20) or 0.0
+            features["ma_50"] = sma(50) or 0.0
+            features["ma_200"] = sma(200) or 0.0
 
         # EMA
         def ema(current: float, prev: Optional[float], period: int) -> float:
@@ -173,22 +195,23 @@ class FeatureCalculator:
         else:
             features["atr_14"] = 0.0
 
-        # Volatility (std of returns last 20)
-        if len(self.returns) >= 20:
-            r20 = list(self.returns)[-20:]
-            mean_r = sum(r20) / 20
-            var = sum((x - mean_r) ** 2 for x in r20) / 20
-            features["vol_20"] = math.sqrt(var)
-        else:
-            features["vol_20"] = 0.0
-        # vol_50
-        if len(self.returns) >= 50:
-            r50 = list(self.returns)[-50:]
-            mean_r50 = sum(r50) / 50
-            var50 = sum((x - mean_r50) ** 2 for x in r50) / 50
-            features["vol_50"] = math.sqrt(var50)
-        else:
-            features["vol_50"] = 0.0
+        if not self.use_fast_features:
+            # Volatility (std of returns last 20)
+            if len(self.returns) >= 20:
+                r20 = list(self.returns)[-20:]
+                mean_r = sum(r20) / 20
+                var = sum((x - mean_r) ** 2 for x in r20) / 20
+                features["vol_20"] = math.sqrt(var)
+            else:
+                features["vol_20"] = 0.0
+            # vol_50
+            if len(self.returns) >= 50:
+                r50 = list(self.returns)[-50:]
+                mean_r50 = sum(r50) / 50
+                var50 = sum((x - mean_r50) ** 2 for x in r50) / 50
+                features["vol_50"] = math.sqrt(var50)
+            else:
+                features["vol_50"] = 0.0
 
         # Candle anatomy
         body = abs(close - open_)
@@ -198,90 +221,87 @@ class FeatureCalculator:
         features["upper_shadow"] = upper_shadow
         features["lower_shadow"] = lower_shadow
 
-        # Bollinger Bands (20,2)
-        if len(self.closes) >= 20:
-            last20 = list(self.closes)[-20:]
-            mean20 = sum(last20) / 20
-            var20 = sum((x - mean20) ** 2 for x in last20) / 20
-            std20 = math.sqrt(var20)
-            bb_upper = mean20 + 2 * std20
-            bb_lower = mean20 - 2 * std20
-            features["bb_upper_20_2"] = bb_upper
-            features["bb_lower_20_2"] = bb_lower
-            if bb_upper != bb_lower:
-                features["bb_pct_b_20_2"] = (close - bb_lower) / (bb_upper - bb_lower)
-                features["bb_bandwidth_20_2"] = (bb_upper - bb_lower) / mean20 if mean20 != 0 else 0.0
+        if not self.use_fast_features:
+            # Bollinger Bands (20,2)
+            if len(self.closes) >= 20:
+                last20 = list(self.closes)[-20:]
+                mean20 = sum(last20) / 20
+                var20 = sum((x - mean20) ** 2 for x in last20) / 20
+                std20 = math.sqrt(var20)
+                bb_upper = mean20 + 2 * std20
+                bb_lower = mean20 - 2 * std20
+                features["bb_upper_20_2"] = bb_upper
+                features["bb_lower_20_2"] = bb_lower
+                if bb_upper != bb_lower:
+                    features["bb_pct_b_20_2"] = (close - bb_lower) / (bb_upper - bb_lower)
+                    features["bb_bandwidth_20_2"] = (bb_upper - bb_lower) / mean20 if mean20 != 0 else 0.0
+                else:
+                    features["bb_pct_b_20_2"] = 0.5
+                    features["bb_bandwidth_20_2"] = 0.0
             else:
+                features["bb_upper_20_2"] = 0.0
+                features["bb_lower_20_2"] = 0.0
                 features["bb_pct_b_20_2"] = 0.5
                 features["bb_bandwidth_20_2"] = 0.0
-        else:
-            features["bb_upper_20_2"] = 0.0
-            features["bb_lower_20_2"] = 0.0
-            features["bb_pct_b_20_2"] = 0.5
-            features["bb_bandwidth_20_2"] = 0.0
-        # Bollinger 50,2 (only pct_b and bandwidth to limit columns)
-        if len(self.closes) >= 50:
-            last50 = list(self.closes)[-50:]
-            mean50 = sum(last50)/50
-            var50 = sum((x - mean50)**2 for x in last50)/50
-            std50 = math.sqrt(var50)
-            upper50 = mean50 + 2*std50
-            lower50 = mean50 - 2*std50
-            if upper50 != lower50:
-                features["bb_pct_b_50_2"] = (close - lower50)/(upper50 - lower50)
-                features["bb_bandwidth_50_2"] = (upper50 - lower50)/mean50 if mean50 != 0 else 0.0
+            # Bollinger 50,2 (only pct_b and bandwidth to limit columns)
+            if len(self.closes) >= 50:
+                last50 = list(self.closes)[-50:]
+                mean50 = sum(last50)/50
+                var50 = sum((x - mean50)**2 for x in last50)/50
+                std50 = math.sqrt(var50)
+                upper50 = mean50 + 2*std50
+                lower50 = mean50 - 2*std50
+                if upper50 != lower50:
+                    features["bb_pct_b_50_2"] = (close - lower50)/(upper50 - lower50)
+                    features["bb_bandwidth_50_2"] = (upper50 - lower50)/mean50 if mean50 != 0 else 0.0
+                else:
+                    features["bb_pct_b_50_2"] = 0.5
+                    features["bb_bandwidth_50_2"] = 0.0
             else:
                 features["bb_pct_b_50_2"] = 0.5
                 features["bb_bandwidth_50_2"] = 0.0
-        else:
-            features["bb_pct_b_50_2"] = 0.5
-            features["bb_bandwidth_50_2"] = 0.0
 
-        # Stochastic %K(14) and %D(3)
-        if len(self.closes) >= 14:
-            last_high = max(list(self.highs)[-14:])
-            last_low = min(list(self.lows)[-14:])
-            if last_high != last_low:
-                k = (close - last_low) / (last_high - last_low) * 100
+        if not self.use_fast_features:
+            # Stochastic %K(14) and %D(3)
+            if len(self.closes) >= 14:
+                last_high = max(list(self.highs)[-14:])
+                last_low = min(list(self.lows)[-14:])
+                if last_high != last_low:
+                    k = (close - last_low) / (last_high - last_low) * 100
+                else:
+                    k = 50.0
+                k_list = []
+                hist = list(self.closes)
+                highs = list(self.highs)
+                lows = list(self.lows)
+                for back in range(0, 3):
+                    if len(hist) >= 14 + back:
+                        segment = hist[-(14 + back): -back or None]
+                        hseg = highs[-(14 + back): -back or None]
+                        lseg = lows[-(14 + back): -back or None]
+                        hh = max(hseg)
+                        ll = min(lseg)
+                        c = segment[-1]
+                        if hh != ll:
+                            k_list.append((c - ll) / (hh - ll) * 100)
+                d = sum(k_list) / len(k_list) if k_list else k
+                features["stoch_k_14_3"] = k
+                features["stoch_d_14_3"] = d
             else:
-                k = 50.0
-            # Smooth %K with 3-period SMA to get %D
-            # Keep last 3 k values in returns deque as proxy by appending?
-            # We maintain a small local list instead for simplicity
-            # Here we approximate %D using last three closes-based %K if available
-            k_list = []
-            # reconstruct up to three past %K using history (approximation)
-            hist = list(self.closes)
-            highs = list(self.highs)
-            lows = list(self.lows)
-            for back in range(0, 3):
-                if len(hist) >= 14 + back:
-                    segment = hist[-(14 + back): -back or None]
-                    hseg = highs[-(14 + back): -back or None]
-                    lseg = lows[-(14 + back): -back or None]
-                    hh = max(hseg)
-                    ll = min(lseg)
-                    c = segment[-1]
-                    if hh != ll:
-                        k_list.append((c - ll) / (hh - ll) * 100)
-            d = sum(k_list) / len(k_list) if k_list else k
-            features["stoch_k_14_3"] = k
-            features["stoch_d_14_3"] = d
-        else:
-            features["stoch_k_14_3"] = 50.0
-            features["stoch_d_14_3"] = 50.0
+                features["stoch_k_14_3"] = 50.0
+                features["stoch_d_14_3"] = 50.0
 
-        # Williams %R(14)
-        if len(self.closes) >= 14:
-            hh = max(list(self.highs)[-14:])
-            ll = min(list(self.lows)[-14:])
-            if hh != ll:
-                willr = -100 * (hh - close) / (hh - ll)
+            # Williams %R(14)
+            if len(self.closes) >= 14:
+                hh = max(list(self.highs)[-14:])
+                ll = min(list(self.lows)[-14:])
+                if hh != ll:
+                    willr = -100 * (hh - close) / (hh - ll)
+                else:
+                    willr = -50.0
             else:
                 willr = -50.0
-        else:
-            willr = -50.0
-        features["williams_r_14"] = willr
+            features["williams_r_14"] = willr
 
         # OBV
         if len(self.closes) >= 2:
@@ -310,55 +330,51 @@ class FeatureCalculator:
         else:
             mfi = 50.0
         features["mfi_14"] = mfi
-        # We approximate rolling sums via lists; for precision, a dedicated deque per flow could be maintained
-        # CMF(20): (sum(ADL) over 20) / (sum(volume) over 20)
-        if len(self.closes) >= 20:
-            # Accumulation/Distribution (ADL) factor for last bar
-            mfm = ((close - low) - (high - close)) / (high - low) if (high - low) != 0 else 0.0
-            adl = mfm * volume
-            # Approximate CMF using last 20 elements lists
-            vols = list(self.volumes)[-20:]
-            highs20 = list(self.highs)[-20:]
-            lows20 = list(self.lows)[-20:]
-            closes20 = list(self.closes)[-20:]
-            adl_sum = 0.0
-            for hi, lo, cl, vol in zip(highs20, lows20, closes20, vols):
-                mfm_i = ((cl - lo) - (hi - cl)) / (hi - lo) if (hi - lo) != 0 else 0.0
-                adl_sum += mfm_i * vol
-            vol_sum = sum(vols)
-            features["cmf_20"] = adl_sum / vol_sum if vol_sum != 0 else 0.0
-        else:
-            features["cmf_20"] = 0.0
-
-        # Volume z-score(20)
-        if len(self.volumes) >= 20:
-            v20 = list(self.volumes)[-20:]
-            mean_v = sum(v20) / 20
-            var_v = sum((x - mean_v) ** 2 for x in v20) / 20
-            std_v = math.sqrt(var_v)
-            features["vol_z_20"] = (volume - mean_v) / std_v if std_v != 0 else 0.0
-        else:
-            features["vol_z_20"] = 0.0
-
-        # Distance to rolling minima / drawdown from rolling max
-        for n in (20, 50):
-            if len(self.closes) >= n:
-                window = list(self.closes)[-n:]
-                min_c = min(window)
-                features[f"dist_min_close_{n}"] = (close - min_c) / min_c if min_c != 0 else 0.0
+        if not self.use_fast_features:
+            # CMF(20): (sum(ADL) over 20) / (sum(volume) over 20)
+            if len(self.closes) >= 20:
+                vols = list(self.volumes)[-20:]
+                highs20 = list(self.highs)[-20:]
+                lows20 = list(self.lows)[-20:]
+                closes20 = list(self.closes)[-20:]
+                adl_sum = 0.0
+                for hi, lo, cl, vol in zip(highs20, lows20, closes20, vols):
+                    mfm_i = ((cl - lo) - (hi - cl)) / (hi - lo) if (hi - lo) != 0 else 0.0
+                    adl_sum += mfm_i * vol
+                vol_sum = sum(vols)
+                features["cmf_20"] = adl_sum / vol_sum if vol_sum != 0 else 0.0
             else:
-                features[f"dist_min_close_{n}"] = 0.0
-        if len(self.closes) >= 20:
-            max20 = max(list(self.closes)[-20:])
-            features["drawdown_from_max_20"] = (close - max20) / max20 if max20 != 0 else 0.0
-        else:
-            features["drawdown_from_max_20"] = 0.0
-        # dist_min_close_100
-        if len(self.closes) >= 100:
-            min100 = min(list(self.closes)[-100:])
-            features["dist_min_close_100"] = (close - min100)/min100 if min100 != 0 else 0.0
-        else:
-            features["dist_min_close_100"] = 0.0
+                features["cmf_20"] = 0.0
+
+        if not self.use_fast_features:
+            # Volume z-score(20)
+            if len(self.volumes) >= 20:
+                v20 = list(self.volumes)[-20:]
+                mean_v = sum(v20) / 20
+                var_v = sum((x - mean_v) ** 2 for x in v20) / 20
+                std_v = math.sqrt(var_v)
+                features["vol_z_20"] = (volume - mean_v) / std_v if std_v != 0 else 0.0
+            else:
+                features["vol_z_20"] = 0.0
+
+            # Distance to rolling minima / drawdown from rolling max
+            for n in (20, 50):
+                if len(self.closes) >= n:
+                    window = list(self.closes)[-n:]
+                    min_c = min(window)
+                    features[f"dist_min_close_{n}"] = (close - min_c) / min_c if min_c != 0 else 0.0
+                else:
+                    features[f"dist_min_close_{n}"] = 0.0
+            if len(self.closes) >= 20:
+                max20 = max(list(self.closes)[-20:])
+                features["drawdown_from_max_20"] = (close - max20) / max20 if max20 != 0 else 0.0
+            else:
+                features["drawdown_from_max_20"] = 0.0
+            if len(self.closes) >= 100:
+                min100 = min(list(self.closes)[-100:])
+                features["dist_min_close_100"] = (close - min100)/min100 if min100 != 0 else 0.0
+            else:
+                features["dist_min_close_100"] = 0.0
 
         # DI+/DI-/ADX(14) - simplified Wilder's smoothing
         if len(self.closes) >= 2:
@@ -534,3 +550,115 @@ class FeatureCalculator:
             if attr in data:
                 setattr(fc, attr, data[attr])
         return fc
+
+
+def _synthetic_candles(total: int) -> Iterable[tuple[float, float, float, float, float]]:
+    """Generate a deterministic synthetic OHLCV stream for benchmarking."""
+
+    for idx in range(total):
+        base = 100 + math.sin(idx / 11.0) * 1.5 + idx * 0.01
+        drift = math.sin(idx / 5.0) * 0.3
+        close = base + drift
+        open_ = close - 0.2
+        high = close + 0.5
+        low = open_ - 0.5
+        volume = 800 + (idx % 17) * 25
+        yield open_, high, low, close, volume
+
+
+def benchmark_features(num_bars: int = 4000, warmup: int = 400, compare: bool = True) -> None:
+    """Benchmark fast feature calculations and optionally compare to the slow path."""
+
+    if num_bars <= 0:
+        raise ValueError("num_bars must be positive")
+    if warmup < 0:
+        raise ValueError("warmup must be >= 0")
+
+    total = num_bars + warmup
+    fast_calc = FeatureCalculator(use_fast_features=True)
+    slow_calc = FeatureCalculator(use_fast_features=False) if compare else None
+
+    fast_times: list[float] = []
+    slow_times: list[float] = []
+    max_diffs = {key: 0.0 for key in FAST_FEATURE_KEYS}
+
+    for idx, (open_, high, low, close, volume) in enumerate(_synthetic_candles(total)):
+        start = time.perf_counter()
+        fast_feats = fast_calc.update(open_, high, low, close, volume)
+        fast_times.append(time.perf_counter() - start)
+
+        if compare and slow_calc is not None:
+            start = time.perf_counter()
+            slow_feats = slow_calc.update(open_, high, low, close, volume)
+            slow_times.append(time.perf_counter() - start)
+            if idx >= warmup:
+                for key in FAST_FEATURE_KEYS:
+                    if key in slow_feats and key in fast_feats:
+                        diff = abs(fast_feats[key] - slow_feats[key])
+                        if diff > max_diffs[key]:
+                            max_diffs[key] = diff
+
+    fast_samples = fast_times[warmup:]
+    slow_samples = slow_times[warmup:] if slow_times else []
+
+    def _summary(samples: list[float]) -> dict[str, float]:
+        if not samples:
+            return {"avg_us": 0.0, "p50_us": 0.0, "max_us": 0.0}
+        return {
+            "avg_us": statistics.mean(samples) * 1e6,
+            "p50_us": statistics.median(samples) * 1e6,
+            "max_us": max(samples) * 1e6,
+        }
+
+    fast_stats = _summary(fast_samples)
+    slow_stats = _summary(slow_samples)
+
+    print("=== Feature Benchmark ===")
+    print(f"bars={num_bars} warmup={warmup} compare={compare}")
+    print(
+        f"Fast path  avg: {fast_stats['avg_us']:.2f}us  p50: {fast_stats['p50_us']:.2f}us  "
+        f"max: {fast_stats['max_us']:.2f}us"
+    )
+    if compare:
+        print(
+            f"Slow path  avg: {slow_stats['avg_us']:.2f}us  p50: {slow_stats['p50_us']:.2f}us  "
+            f"max: {slow_stats['max_us']:.2f}us"
+        )
+        worst_key = max(max_diffs, key=max_diffs.get)
+        print(f"Max |fast-slow| diff: {max_diffs[worst_key]:.6g} ({worst_key})")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Feature calculator utilities")
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Run the built-in feature benchmark (default arguments provided)",
+    )
+    parser.add_argument(
+        "--bars",
+        type=int,
+        default=4000,
+        help="Number of benchmark bars to measure (excludes warmup)",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=400,
+        help="Number of warmup bars to exclude from timing stats",
+    )
+    parser.add_argument(
+        "--no-compare",
+        action="store_true",
+        help="Skip slow-path comparisons to focus purely on fast timings",
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    arg_parser = _build_parser()
+    args = arg_parser.parse_args()
+    if args.benchmark:
+        benchmark_features(num_bars=args.bars, warmup=args.warmup, compare=not args.no_compare)
+    else:
+        arg_parser.print_help()

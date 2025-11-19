@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Type
 
 from sqlmodel import Session, select
 
 from .models import Trade, TradeFill
 from .core.config import settings
+log = logging.getLogger(__name__)
+
 try:
     from .scheduler import trigger_trade_close_retrain
 except Exception:
@@ -27,14 +30,28 @@ class EntryConfig:
     require_tf_ok: bool = True
 
 
-class TradeManager:
-    """Simple long-only manager with unlimited DCA (cooldown + price drop).
 
-    - Opens trade when entry conditions satisfied
-    - Adds only if current price < last fill price and cooldown passed
-    - Closes when price crosses TP/SL relative to avg_price
-    - Leverage is informational here; TP/SL are on underlying move (e.g., +1%, -0.5%)
-    """
+class BaseStrategy:
+    """Interface for trade strategies plugged into TradeManager."""
+
+    name: str = "base"
+
+    def process(
+        self,
+        symbol: str,
+        interval: str,
+        exchange_type: str,
+        price: float,
+        nowcast: Dict[str, Any],
+        features_health: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class StackingStrategy(BaseStrategy):
+    """Default long-only strategy driven by stacking decisions."""
+
+    name = "stacking"
 
     def __init__(self, session_factory, leverage: int = 10, add_cooldown_seconds: int = 600):
         self.session_factory = session_factory
@@ -43,8 +60,25 @@ class TradeManager:
         self.add_cooldown_seconds = max(0, int(add_cooldown_seconds))
         # Trailing TP per-trade runtime state (not persisted). Keyed by trade.id
         self._trail_state: Dict[int, Dict[str, Any]] = {}
+        self.entry_config = EntryConfig()
 
     # ---------- Entry heuristics using nowcast -----------
+    def _features_ok(self, features_health: Optional[Dict[str, Any]]) -> bool:
+        cfg = self.entry_config
+        if not features_health:
+            return True
+        fresh_sec = features_health.get('data_fresh_seconds')
+        if cfg.require_fresh and (fresh_sec is None or float(fresh_sec) >= 300.0):
+            return False
+        miss = int(features_health.get('missing_minutes_24h') or 0)
+        if cfg.require_no_gaps and miss >= 10:
+            return False
+        has5 = bool(features_health.get('5m_latest_open_time'))
+        has15 = bool(features_health.get('15m_latest_open_time'))
+        if cfg.require_tf_ok and not (has5 and has15):
+            return False
+        return True
+
     def _passes_entry(self, nowcast: Dict[str, Any], features_health: Optional[Dict[str, Any]] = None) -> bool:
         # Simplified: only stacking threshold decision required.
         s = (nowcast or {}).get('stacking') or {}
@@ -65,19 +99,20 @@ class TradeManager:
         except Exception:
             # Fail safe: treat as not passing if config resolution fails
             return False
-        # Optional: still enforce basic data freshness/gap checks if provided.
-        cfg = EntryConfig()
-        if features_health:
-            fresh_sec = features_health.get('data_fresh_seconds')
-            if cfg.require_fresh and (fresh_sec is None or float(fresh_sec) >= 300.0):
-                return False
-            miss = int(features_health.get('missing_minutes_24h') or 0)
-            if cfg.require_no_gaps and miss >= 10:
-                return False
-            has5 = bool(features_health.get('5m_latest_open_time'))
-            has15 = bool(features_health.get('15m_latest_open_time'))
-            if cfg.require_tf_ok and not (has5 and has15):
-                return False
+        return self._features_ok(features_health)
+
+    def _can_add_signal(self, nowcast: Dict[str, Any]) -> bool:
+        s = (nowcast or {}).get('stacking') or {}
+        if not s.get('ready') or not s.get('decision'):
+            return False
+        try:
+            from .core.config import settings as _s
+            if getattr(_s, 'ENTRY_META_GATE_ENABLED', True):
+                em = s.get('entry_meta') if isinstance(s, dict) else None
+                if not (isinstance(em, dict) and em.get('entry_decision')):
+                    return False
+        except Exception:
+            return False
         return True
 
     # ---------- Public API -----------
@@ -231,18 +266,8 @@ class TradeManager:
                     except Exception:
                         pass
                     return action
-                # DCA add if price lower and adds remain and signal still ON and cooldown passed
-                s = (nowcast or {}).get('stacking') or {}
-                # Restored: require stacking.decision plus (if enabled) entry_meta.entry_decision for adds.
-                can_add_signal = bool(s.get('decision'))
-                try:
-                    from .core.config import settings as _s
-                    if getattr(_s, 'ENTRY_META_GATE_ENABLED', True):
-                        em = s.get('entry_meta') if isinstance(s, dict) else None
-                        if not (isinstance(em, dict) and em.get('entry_decision')):
-                            can_add_signal = False
-                except Exception:
-                    can_add_signal = False
+                # DCA add if price lower and signal still ON and cooldown passed
+                can_add_signal = self._can_add_signal(nowcast)
                 # Removed avg_price gate; rely on last fill price strictly below check
                 if can_add_signal:
                     can_add = True
@@ -264,3 +289,74 @@ class TradeManager:
                         action.update({"action": "add", "trade_id": trade.id, "avg_price": trade.avg_price, "qty": trade.quantity, "adds_done": trade.adds_done})
             session.commit()
         return action
+
+
+class HeuristicStrategy(StackingStrategy):
+    """Fallback strategy that relies on heuristic bottom scores only."""
+
+    name = "heuristic"
+
+    def __init__(
+        self,
+        session_factory,
+        leverage: int = 10,
+        add_cooldown_seconds: int = 600,
+        entry_threshold: Optional[float] = None,
+        add_threshold: Optional[float] = None,
+    ) -> None:
+        super().__init__(session_factory, leverage=leverage, add_cooldown_seconds=add_cooldown_seconds)
+        self.entry_threshold = float(entry_threshold or getattr(settings, 'HEURISTIC_ENTRY_THRESHOLD', 0.65))
+        self.add_threshold = float(add_threshold or getattr(settings, 'HEURISTIC_ADD_THRESHOLD', self.entry_threshold))
+
+    def _passes_entry(self, nowcast: Dict[str, Any], features_health: Optional[Dict[str, Any]] = None) -> bool:
+        score = float(nowcast.get('bottom_score') or 0.0)
+        if score < self.entry_threshold:
+            return False
+        return self._features_ok(features_health)
+
+    def _can_add_signal(self, nowcast: Dict[str, Any]) -> bool:
+        score = float(nowcast.get('bottom_score') or 0.0)
+        return score >= self.add_threshold
+
+
+STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {
+    StackingStrategy.name: StackingStrategy,
+    HeuristicStrategy.name: HeuristicStrategy,
+}
+
+
+class TradeManager:
+    """Wrapper that instantiates strategies based on configuration."""
+
+    def __init__(
+        self,
+        session_factory,
+        leverage: int = 10,
+        add_cooldown_seconds: int = 600,
+        strategy_name: Optional[str] = None,
+        strategy: Optional[BaseStrategy] = None,
+    ) -> None:
+        name = (strategy_name or getattr(settings, "TRADE_STRATEGY", StackingStrategy.name)).lower()
+        if strategy is not None:
+            self.strategy = strategy
+            self.strategy_name = getattr(strategy, "name", name)
+        else:
+            StrategyCls = STRATEGY_REGISTRY.get(name)
+            if StrategyCls is None:
+                log.warning("Unknown trade strategy '%s'; defaulting to '%s'", name, StackingStrategy.name)
+                StrategyCls = StackingStrategy
+                name = StackingStrategy.name
+            self.strategy = StrategyCls(session_factory, leverage=leverage, add_cooldown_seconds=add_cooldown_seconds)
+            self.strategy_name = name
+
+    def process(
+        self,
+        symbol: str,
+        interval: str,
+        exchange_type: str,
+        price: float,
+        nowcast: Dict[str, Any],
+        features_health: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self.strategy.process(symbol, interval, exchange_type, price, nowcast, features_health)
+

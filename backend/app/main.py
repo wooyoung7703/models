@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .db import init_db, engine, get_session
 from .collector import BinanceCollector
@@ -26,7 +26,7 @@ app = FastAPI(title="Models API", version="0.1.0")
 collector = BinanceCollector()
 _resampler_task = None
 _predict_task = None
-_predictor: RealTimePredictor | None = None
+_predictor: Optional[RealTimePredictor] = None
 _predictor_tasks_multi: dict[str, asyncio.Task] = {}
 app.state.trade_manager = None
 
@@ -97,7 +97,7 @@ async def health_trading():
     """
     from datetime import datetime
     from .models import Trade, TradeFill
-    tm: TradeManager | None = getattr(app.state, 'trade_manager', None)
+    tm: Optional[TradeManager] = getattr(app.state, 'trade_manager', None)
     # Use an ephemeral Trade instance to read model defaults
     probe = Trade(symbol=settings.SYMBOL, exchange_type=settings.EXCHANGE_TYPE, interval=settings.INTERVAL, entry_price=0.0, avg_price=0.0)
     info: Dict[str, Any] = {
@@ -156,7 +156,7 @@ async def health_trading():
 
 
 @app.get("/health/features")
-async def health_features(symbol: str | None = None, include_psi: int = 1):
+async def health_features(symbol: Optional[str] = None, include_psi: int = 1):
     """Return data freshness and feature completeness metrics for the primary stream.
     Lightweight to avoid heavy table scans.
     """
@@ -485,7 +485,7 @@ async def on_shutdown():
 
 
 @app.get("/nowcast")
-async def nowcast(symbol: str | None = None):
+async def nowcast(symbol: Optional[str] = None):
     """Return latest periodic prediction(s).
 
     - If symbol provided, returns that symbol's nowcast when available.
@@ -495,25 +495,45 @@ async def nowcast(symbol: str | None = None):
     if symbol:
         return data.get(symbol.lower())
     # Attach summarised stacking snapshot for quick status
-    try:
-        from .model_adapters import registry as _reg
-        status = _reg.status()
-        stk = status.get('stacking') if isinstance(status, dict) else None
-        if stk and stk.get('ready'):
-            data['_stacking_meta'] = {
-                'method': stk.get('method'),
-                'method_meta': stk.get('method_meta'),
-                'method_override': stk.get('method_override'),
-                'threshold': stk.get('threshold'),
-                'threshold_source': stk.get('threshold_source'),
-                'used_models': stk.get('models'),
-            }
-    except Exception:
-        pass
+    stack_from_state = None
+    for sym, payload in data.items():
+        if not isinstance(payload, dict):
+            continue
+        if sym.startswith('_'):
+            continue
+        st_block = payload.get('stacking') if isinstance(payload, dict) else None
+        if isinstance(st_block, dict) and st_block.get('ready'):
+            stack_from_state = st_block
+            break
+    if stack_from_state:
+        data['_stacking_meta'] = {
+            'method': stack_from_state.get('method'),
+            'method_meta': stack_from_state.get('method_meta'),
+            'method_override': stack_from_state.get('method_override'),
+            'threshold': stack_from_state.get('threshold'),
+            'threshold_source': stack_from_state.get('threshold_source'),
+            'used_models': stack_from_state.get('used_models'),
+        }
+    else:
+        try:
+            from .model_adapters import registry as _reg
+            status = _reg.status()
+            stk = status.get('stacking') if isinstance(status, dict) else None
+            if stk and stk.get('ready'):
+                data['_stacking_meta'] = {
+                    'method': stk.get('method'),
+                    'method_meta': stk.get('method_meta'),
+                    'method_override': stk.get('method_override'),
+                    'threshold': stk.get('threshold'),
+                    'threshold_source': stk.get('threshold_source'),
+                    'used_models': stk.get('models'),
+                }
+        except Exception:
+            pass
     return data
 
 @app.get("/live_price")
-async def live_price(symbol: str | None = None):
+async def live_price(symbol: Optional[str] = None):
     """Return current in-progress candle live price(s) captured from websocket.
 
     If symbol provided returns single float (or null if not yet received).
@@ -545,7 +565,7 @@ async def list_trades(limit: int = 50):
                 select(TradeFill).where(TradeFill.trade_id == t.id).order_by(TradeFill.timestamp.asc())  # type: ignore[attr-defined]
             ).all()
             # Cooldown computation
-            tm: TradeManager | None = getattr(app.state, 'trade_manager', None)
+            tm: Optional[TradeManager] = getattr(app.state, 'trade_manager', None)
             cooldown = int(getattr(tm, 'add_cooldown_seconds', 0) or 0)
             last_fill_at = fills[-1].timestamp if fills else t.created_at
             next_add_in_seconds = None
@@ -590,7 +610,7 @@ async def list_open_trades():
             .where((Trade.status == 'open') & (Trade.symbol.in_(settings.SYMBOLS)))  # type: ignore[attr-defined]
             .order_by(text('created_at DESC'))
         )
-        tm: TradeManager | None = getattr(app.state, 'trade_manager', None)
+        tm: Optional[TradeManager] = getattr(app.state, 'trade_manager', None)
         cooldown = int(getattr(tm, 'add_cooldown_seconds', 0) or 0)
         out = []
         for t in rows:
@@ -649,7 +669,7 @@ async def admin_trigger_prob_drift_retrain():
 
 
 @app.post("/admin/scheduler/start")
-async def admin_scheduler_start(tz: str | None = None):
+async def admin_scheduler_start(tz: Optional[str] = None):
     """Start the scheduler (idempotent). Optional timezone override via ?tz=..."""
     try:
         tz_name = tz or getattr(settings, 'SCHEDULER_TZ', None)

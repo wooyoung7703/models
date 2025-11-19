@@ -3,6 +3,8 @@ import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Dict, Any, Optional
+
+from .heuristic_scoring import compute_bottom_score
 from .model_adapters import registry
 
 log = logging.getLogger(__name__)
@@ -68,61 +70,12 @@ class RealTimePredictor:
         close = float(getattr(row, 'close', 0.0) or 0.0)
         if price_override is not None:
             close = float(price_override)
-        rsi = float(getattr(row, 'rsi_14', 50.0) or 50.0)
-        bb_pct_b = float(getattr(row, 'bb_pct_b_20_2', 0.5) or 0.5)
-        dd20 = float(getattr(row, 'drawdown_from_max_20', 0.0) or 0.0)
-        macd_hist = float(getattr(row, 'macd_hist', 0.0) or 0.0)
-        volz = float(getattr(row, 'vol_z_20', 0.0) or 0.0)
-        willr = float(getattr(row, 'williams_r_14', -50.0) or -50.0)
-
-        # Feature transforms into [0,1] encouraging "bottom" signal when near extremes
-        # Lower RSI -> higher score (below 30 strong), clamp to [0,1]
-        s_rsi = max(0.0, min(1.0, (30.0 - rsi) / 30.0))
-        # Bollinger %B near 0 -> higher score
-        s_bb = max(0.0, min(1.0, (0.25 - bb_pct_b) / 0.25))
-        # Drawdown (negative) magnitude up to ~-5% maps toward 1
-        s_dd = max(0.0, min(1.0, -dd20 / 0.05))
-        # MACD histogram negative (below 0) favors bottom; invert sign and scale
-        s_macd = max(0.0, min(1.0, -macd_hist / (abs(macd_hist) + 1e-6))) * 0.5
-        # Volume z-score > 1 may indicate capitulation; map (volz-1)/3 to [0,1]
-        s_vol = max(0.0, min(1.0, (volz - 1.0) / 3.0))
-        # Williams %R near -100 -> bottom; map (-80 to -100) into 0..1
-        s_wr = max(0.0, min(1.0, (-80.0 - willr) / 20.0))
-
-        # Weighted combination -> logit -> sigmoid to get [0,1]
-        # Weights favor RSI, %B, and drawdown; volume helps when extreme.
-        w_rsi = 1.8
-        w_bb = 1.5
-        w_dd = 1.2
-        w_macd = 0.6
-        w_vol = 0.8
-        w_wr = 0.9
-        logit = (
-            w_rsi * s_rsi
-            + w_bb * s_bb
-            + w_dd * s_dd
-            + w_macd * s_macd
-            + w_vol * s_vol
-            + w_wr * s_wr
-            - 2.0  # bias
-        )
-        score = float(_sigmoid(logit))
-
-        comp: Dict[str, Any] = {
-            'rsi_14': rsi,
-            'bb_pct_b_20_2': bb_pct_b,
-            'drawdown_from_max_20': dd20,
-            'macd_hist': macd_hist,
-            'vol_z_20': volz,
-            'williams_r_14': willr,
-            's_rsi': s_rsi,
-            's_bb': s_bb,
-            's_dd': s_dd,
-            's_macd': s_macd,
-            's_vol': s_vol,
-            's_wr': s_wr,
-            'logit': logit,
-        }
+        heuristic = compute_bottom_score(row, price_override=price_override)
+        score = heuristic.prob
+        comp = dict(heuristic.components)
+        # For backward compatibility keep component payload identical (exclude close)
+        comp.pop('close', None)
+        volz = comp.get('vol_z_20', 0.0)
         # price_source captured separately in NowcastResult (avoid polluting components)
 
         ts = getattr(row, 'close_time', None) or getattr(row, 'open_time', None)

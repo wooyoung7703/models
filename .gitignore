@@ -45,3 +45,5 @@ backend/data/*.db
 backend/data/*.db-*
 backend/data/*-wal
 backend/data/*-shm
+backend/data/seq_buffer_state*.json*
+backend/data/seq_buffer_archives/

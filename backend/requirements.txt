@@ -1,7 +1,11 @@
 python-dotenv==1.0.0
+pydantic-settings>=2.2.1
 sqlmodel==0.0.14
 websockets==11.0.3
+fastapi>=0.120.0
+httpx>=0.28.0
 pytest==8.3.3
+jsonschema>=4.21.0
 python-json-logger==2.0.7
 numpy>=1.26.0
 pandas>=2.0.0
@@ -13,4 +17,5 @@ optuna>=3.5.0
 
 # Scheduler for monthly training
 APScheduler>=3.10.4
+watchfiles>=0.21.0
 

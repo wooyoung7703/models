@@ -13,6 +13,7 @@ from .models import Candle
 from .snapshots import save_feature_state
 from .features import FeatureCalculator
 from .seq_buffer import get_buffer, extract_vector_from_candle
+from .pipeline import PredictQueueManager, CandlePayload
 
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class BinanceCollector:
         self.features_by_symbol: Dict[str, FeatureCalculator] = {}
         # Live prices per symbol from in-progress klines (updated on every WS tick)
         self.live_prices: Dict[str, float] = {}
+        self._pipeline: Optional[PredictQueueManager] = None
 
     async def start(self):
         if self._task and not self._task.done():
@@ -58,6 +60,9 @@ class BinanceCollector:
         self._stop.set()
         if self._task:
             await self._task
+
+    def attach_pipeline(self, pipeline: PredictQueueManager) -> None:
+        self._pipeline = pipeline
 
     async def _run(self):
         backoff = settings.RECONNECT_MIN_SEC
@@ -203,6 +208,7 @@ class BinanceCollector:
                 log.debug("seq_buffer append %s len=%d vector_sample=%s", symbol, len(buf), [round(v,4) for v in vec[:5]])
             except Exception:
                 pass
+            self._publish_to_pipeline(symbol, candle, vec)
         except Exception:
             log.exception("Failed to append to sequence buffer for %s", symbol)
 
@@ -242,6 +248,24 @@ class BinanceCollector:
                 session.rollback()
                 log.warning("[collector] insert failed: %s", e)
                 _try_alert(f"Insert failed: {e}")
+
+    def _publish_to_pipeline(self, symbol: str, candle: Candle, vec):
+        if not self._pipeline:
+            return
+        try:
+            try:
+                candle_copy = candle.model_copy(deep=True)  # pydantic v2
+            except AttributeError:
+                candle_copy = candle.copy(deep=True)  # type: ignore[attr-defined]
+            payload = CandlePayload(
+                candle=candle_copy,
+                seq_vector=list(vec) if isinstance(vec, list) else None,
+            )
+            accepted = self._pipeline.publish(symbol, payload)
+            if not accepted:
+                log.warning("predict_queue publish failed symbol=%s", symbol)
+        except Exception:
+            log.exception("predict_queue publish error for %s", symbol)
 
 
 # --- Alert helper (non-blocking best-effort) ---

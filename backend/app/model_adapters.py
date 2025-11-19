@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+from jsonschema import Draft202012Validator, ValidationError
 import json
 import logging
 import os
@@ -19,6 +21,71 @@ import os
 from .core.config import settings
 
 log = logging.getLogger(__name__)
+
+
+_CANDLE_FIELDS_CACHE: Optional[List[str]] = None
+
+
+def _load_feature_manifest(path: Optional[str]) -> List[str]:
+    if not path:
+        return []
+    try:
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as src:
+            payload = json.load(src)
+        if isinstance(payload, dict):
+            features = payload.get("feature_names") or payload.get("features")
+        elif isinstance(payload, list):
+            features = payload
+        else:
+            features = None
+        if not features:
+            log.warning("[xgb] feature manifest %s is empty", path)
+            return []
+        return [str(f) for f in features]
+    except Exception as exc:
+        log.warning("[xgb] failed to load feature manifest %s: %s", path, exc)
+        return []
+
+
+def _get_candle_field_names() -> List[str]:
+    global _CANDLE_FIELDS_CACHE
+    if _CANDLE_FIELDS_CACHE is not None:
+        return _CANDLE_FIELDS_CACHE
+    try:
+        from .models import Candle  # local import
+        fields = []
+        mf = getattr(Candle, 'model_fields', None)
+        if isinstance(mf, dict):
+            fields = list(mf.keys())
+        elif isinstance(getattr(Candle, '__fields__', None), dict):
+            fields = list(getattr(Candle, '__fields__').keys())
+        elif isinstance(getattr(Candle, '__annotations__', None), dict):
+            fields = list(getattr(Candle, '__annotations__').keys())
+        _CANDLE_FIELDS_CACHE = fields
+    except Exception as exc:
+        log.warning("[xgb] candle schema inspection failed: %s", exc)
+        _CANDLE_FIELDS_CACHE = []
+    return _CANDLE_FIELDS_CACHE
+
+
+def analyze_feature_alignment(feature_names: List[str]) -> Dict[str, Any]:
+    if not feature_names:
+        raise ValueError("feature list is empty; retrain artifacts must include feature_names")
+    candle_fields = _get_candle_field_names()
+    candle_set = set(candle_fields)
+    generic = [f for f in feature_names if f.startswith('f') and f[1:].isdigit()]
+    matched = [f for f in feature_names if f in candle_set]
+    missing = [f for f in feature_names if f not in candle_set and f not in generic]
+    if missing:
+        raise ValueError(f"unknown feature names: {', '.join(missing[:8])}")
+    return {
+        "total": len(feature_names),
+        "matched": len(matched),
+        "generic": len(generic),
+        "missing": len(missing),
+    }
 
 
 @dataclass
@@ -77,31 +144,22 @@ class XGBTabularAdapter(BaseAdapter):
                 self._booster = booster
                 self._features = []  # unknown; will fall back to getattr mapping or zeros
                 log.info("[xgb] loaded raw model from %s", self.model_path)
-            # Health check: match feature names to Candle fields (best-effort)
+            manifest_features = _load_feature_manifest(settings.MODEL_XGB_FEATURES_PATH)
+            if not self._features and manifest_features:
+                self._features = manifest_features
+                log.info("[xgb] adopted feature manifest (%d names) from %s", len(self._features), settings.MODEL_XGB_FEATURES_PATH)
+            elif self._features and manifest_features and self._features != manifest_features:
+                log.warning("[xgb] model payload feature list differs from manifest (%s); using payload order", settings.MODEL_XGB_FEATURES_PATH)
             try:
-                from .models import Candle  # local import
-                candle_fields = []
-                mf = getattr(Candle, 'model_fields', None)
-                if isinstance(mf, dict):
-                    candle_fields = list(mf.keys())
-                elif isinstance(getattr(Candle, '__fields__', None), dict):
-                    candle_fields = list(getattr(Candle, '__fields__').keys())
-                elif isinstance(getattr(Candle, '__annotations__', None), dict):
-                    candle_fields = list(getattr(Candle, '__annotations__').keys())
-                candle_set = set(candle_fields)
-                generic = [f for f in self._features if f.startswith('f') and f[1:].isdigit()]
-                matched = [f for f in self._features if f in candle_set]
-                missing = [f for f in self._features if f not in candle_set and f not in generic]
-                if self._features:
-                    log.info(
-                        "[xgb] feature mapping: total=%d matched=%d generic=%d missing=%d", 
-                        len(self._features), len(matched), len(generic), len(missing)
-                    )
-                    if missing:
-                        # Only warn once; large list may be noisy
-                        log.warning("[xgb] %d feature names not found in Candle schema (first 8): %s", len(missing), missing[:8])
-            except Exception as _e:
-                log.debug("[xgb] feature health check skipped: %s", _e)
+                stats = analyze_feature_alignment(self._features)
+                log.info(
+                    "[xgb] feature mapping: total=%d matched=%d generic=%d missing=%d",
+                    stats["total"], stats["matched"], stats["generic"], stats["missing"],
+                )
+            except ValueError as exc:
+                log.error("[xgb] feature alignment failed: %s", exc)
+                self._booster = None
+                return
         except Exception as e:
             log.warning("[xgb] load failed: %s", e)
 
@@ -459,6 +517,7 @@ class StackingCombiner:
                 return
             with open(self.meta_path, "r") as f:
                 meta = json.load(f)
+            self._validate_meta(meta)
             self.method = meta.get("ensemble", "logistic")
             self.model_order = meta.get("model_order") or meta.get("models") or []
             self.coef = meta.get("coef")
@@ -488,6 +547,21 @@ class StackingCombiner:
             log.info("[stacking] loaded meta (method=%s models=%s)", self.method, ",".join(self.model_order))
         except Exception as e:
             log.warning("[stacking] load failed: %s", e)
+            raise
+
+    def _validate_meta(self, meta: Dict[str, Any]) -> None:
+        try:
+            schema_path = Path(__file__).resolve().parents[2] / "docs" / "model_artifacts.schema.json"
+            with open(schema_path, "r", encoding="utf-8") as sf:
+                schema = json.load(sf)
+            validator = Draft202012Validator(schema)
+            validator.validate(meta)
+        except FileNotFoundError:
+            log.warning("[stacking] schema file missing; skipping validation")
+        except ValidationError as exc:
+            raise ValueError(f"Stacking meta schema validation failed: {exc.message}") from exc
+        except Exception as exc:
+            raise ValueError(f"Stacking meta schema validation error: {exc}") from exc
 
     def _load_bvf_meta(self) -> None:
         """Load optional bottom_vs_forecast meta logistic coefficients.

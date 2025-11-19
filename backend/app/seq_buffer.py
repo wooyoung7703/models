@@ -7,7 +7,13 @@ Adapters can read from these buffers to build inputs for LSTM/Transformer.
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, Dict, List, Optional
+from datetime import datetime
+import gzip
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional
 
 from .core.config import settings
 
@@ -74,3 +80,119 @@ def extract_vector_from_candle(candle: "Candle") -> List[float]:  # type: ignore
         _f("vwap_20_dev", 0.0),      # 15 deviation from short VWAP
     ]
     return vec
+
+
+def snapshot_buffers() -> Dict[str, List[List[float]]]:
+    return {
+        sym: buf.to_list()
+        for sym, buf in _buffers.items()
+        if len(buf) > 0
+    }
+
+
+def save_buffers_to_path(path: str) -> int:
+    if not path:
+        return 0
+    data = snapshot_buffers()
+    payload = {
+        "version": 1,
+        "seq_len": int(settings.SEQ_LEN),
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "buffers": data,
+    }
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    _archive_snapshot(payload)
+    return len(data)
+
+
+def load_buffers_from_path(path: str, *, seq_len: Optional[int] = None) -> int:
+    if not path or not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    buffers = payload.get("buffers") or payload.get("symbols") or {}
+    loaded = 0
+    capacity = int(seq_len or settings.SEQ_LEN)
+    for sym, vectors in buffers.items():
+        if not isinstance(vectors, list):
+            continue
+        buf = SequenceBuffer(capacity)
+        for vec in vectors[-capacity:]:
+            if not isinstance(vec, list):
+                continue
+            cleaned: List[float] = []
+            for val in vec:
+                try:
+                    cleaned.append(float(val))
+                except Exception:
+                    cleaned.append(0.0)
+            buf.append(cleaned)
+        if len(buf) == 0:
+            continue
+        _buffers[str(sym).lower()] = buf
+        loaded += 1
+    return loaded
+
+
+def _archive_snapshot(payload: Dict[str, Any]) -> None:
+    archive_dir = getattr(settings, "SEQ_BUFFER_SNAPSHOT_ARCHIVE_DIR", "") or ""
+    if not archive_dir:
+        return
+    keep = max(0, int(getattr(settings, "SEQ_BUFFER_SNAPSHOT_ARCHIVE_KEEP", 0)))
+    compress = bool(getattr(settings, "SEQ_BUFFER_SNAPSHOT_COMPRESS", False))
+    directory = Path(archive_dir)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # pragma: no cover - filesystem errors rare
+        logging.warning("Sequence buffer archive dir create failed: %s", exc)
+        return
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    suffix = ".json.gz" if compress else ".json"
+    archive_path = directory / f"seq_buffer_{ts}{suffix}"
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    try:
+        if compress:
+            with gzip.open(archive_path, "wb") as fh:
+                fh.write(data)
+        else:
+            archive_path.write_bytes(data)
+    except Exception as exc:  # pragma: no cover - best-effort archival
+        logging.warning("Sequence buffer archive write failed: %s", exc)
+        return
+    if keep > 0:
+        _enforce_archive_retention(directory, keep)
+
+
+def _enforce_archive_retention(directory: Path, keep: int) -> None:
+    try:
+        files = sorted(
+            (p for p in directory.glob("seq_buffer_*.json*") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception as exc:  # pragma: no cover - filesystem errors rare
+        logging.warning("Sequence buffer archive scan failed: %s", exc)
+        return
+    for old in files[keep:]:
+        try:
+            old.unlink()
+        except Exception:
+            logging.debug("Sequence buffer archive cleanup skipped for %s", old)
+
+
+def clear_buffers() -> None:
+    _buffers.clear()
+
+
+__all__ = [
+    "SequenceBuffer",
+    "get_buffer",
+    "extract_vector_from_candle",
+    "snapshot_buffers",
+    "save_buffers_to_path",
+    "load_buffers_from_path",
+    "clear_buffers",
+]

@@ -1,21 +1,33 @@
 from sqlmodel import Session, select
 from backend.app.trade_manager import TradeManager
+from backend.app.core.config import settings
 from backend.app.models import Trade, TradeFill
 from backend.app.db import init_db, engine
 
 
-def _fake_nowcast(prob: float, threshold: float = 0.9, margin: float = 0.0, conf: float = 0.0, bottom: float = 0.0, z: float = 0.0, decision: bool = False):
+def _fake_nowcast(
+    prob: float,
+    threshold: float = 0.9,
+    margin: float = 0.0,
+    conf: float = 0.0,
+    bottom: float = 0.0,
+    z: float = 0.0,
+    decision: bool = False,
+    entry_decision: bool = True,
+):
+    stacking = {
+        'ready': True,
+        'prob': prob,
+        'threshold': threshold,
+        'margin': margin,
+        'confidence': conf,
+        'z': z,
+        'decision': decision,
+    }
+    stacking['entry_meta'] = {'entry_decision': entry_decision}
     return {
         'bottom_score': bottom,
-        'stacking': {
-            'ready': True,
-            'prob': prob,
-            'threshold': threshold,
-            'margin': margin,
-            'confidence': conf,
-            'z': z,
-            'decision': decision,
-        }
+        'stacking': stacking,
     }
 
 
@@ -58,3 +70,33 @@ def test_dca_add(tmp_path):
     # Slightly less than 0.5% drop to avoid SL (<= -0.5% would close)
     act = tm.process(symbol='ethusdt', interval='1m', exchange_type='futures', price=49.8, nowcast=nc_add)
     assert act['action'] in {'add','hold'}
+
+
+def test_trade_manager_strategy_selection(monkeypatch):
+    class DummyStrategy:
+        name = 'dummy'
+        def __init__(self):
+            self.calls = 0
+        def process(self, *args, **kwargs):
+            self.calls += 1
+            return {'action': 'noop'}
+
+    dummy = DummyStrategy()
+    tm = TradeManager(lambda: Session(engine), strategy=dummy)
+    assert tm.strategy_name == 'dummy'
+    result = tm.process('xrpusdt', '1m', 'futures', 100.0, _fake_nowcast(0.9))
+    assert result['action'] == 'noop'
+    assert dummy.calls == 1
+
+
+def test_heuristic_strategy_entry(monkeypatch):
+    # Ensure heuristics thresholds allow entry/add
+    monkeypatch.setattr(settings, 'HEURISTIC_ENTRY_THRESHOLD', 0.6, raising=False)
+    monkeypatch.setattr(settings, 'HEURISTIC_ADD_THRESHOLD', 0.55, raising=False)
+    tm = TradeManager(lambda: Session(engine), add_cooldown_seconds=0, strategy_name='heuristic')
+    nc_enter = _fake_nowcast(prob=0.2, margin=0.0, conf=0.0, bottom=0.7, decision=False)
+    enter = tm.process(symbol='xrpusdt', interval='1m', exchange_type='futures', price=20.0, nowcast=nc_enter)
+    assert enter['action'] == 'enter'
+    nc_add = _fake_nowcast(prob=0.3, margin=0.0, conf=0.0, bottom=0.65, decision=False)
+    act = tm.process(symbol='xrpusdt', interval='1m', exchange_type='futures', price=19.8, nowcast=nc_add)
+    assert act['action'] in {'add', 'hold'}

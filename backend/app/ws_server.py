@@ -17,6 +17,13 @@ from .predictor import RealTimePredictor
 from .model_adapters import registry
 from .gap_fill import find_missing_ranges, seed_feature_calculator
 from .snapshots import load_feature_state, save_feature_state
+from .seq_buffer import (
+    get_buffer,
+    extract_vector_from_candle,
+    load_buffers_from_path,
+    save_buffers_to_path,
+)
+from .pipeline import PredictQueueManager
 from pathlib import Path
 from datetime import datetime
 try:
@@ -41,13 +48,15 @@ class AppState:
         self.entry_metrics: Dict[str, Any] = {}
         self.entry_history_overall: list[Dict[str, Any]] = []
         self.entry_history_by_symbol: Dict[str, list[Dict[str, Any]]] = {}
+        self.predict_queue = PredictQueueManager(maxsize=getattr(settings, "PREDICT_QUEUE_MAXSIZE", 4))
 
 if TYPE_CHECKING:
     from .trade_manager import TradeManager
 
 
 state = AppState()
-shutdown_event: asyncio.Event = asyncio.Event()
+state.collector.attach_pipeline(state.predict_queue)
+shutdown_event: Optional[asyncio.Event] = None
 
 def _get_model_fields(model_cls) -> list[str]:
     mf = getattr(model_cls, "model_fields", None)
@@ -224,22 +233,33 @@ def _compute_features_health(session: Session, sym: str) -> Dict[str, Any]:
 
 
 async def predictor_loop(sym: str) -> None:
-    import math
     predictor = RealTimePredictor(symbol=sym, interval=settings.INTERVAL)
     interval = max(5, settings.PREDICT_INTERVAL_SECONDS)
+    queue_timeout = float(getattr(settings, 'PREDICT_QUEUE_GET_TIMEOUT', 0.5))
+    queue_idle_sleep = float(getattr(settings, 'PREDICT_QUEUE_IDLE_SLEEP_SECONDS', 0.05))
     try:
         logging.info("predictor_loop started for %s interval=%ss", sym, interval)
     except Exception:
         pass
     while True:
         try:
+            payload = None
+            if getattr(state, 'predict_queue', None) is not None:
+                try:
+                    payload = await state.predict_queue.get(sym, timeout=queue_timeout)
+                except Exception as _qerr:
+                    logging.warning("predict_queue get failed for %s: %s", sym, _qerr)
+                    payload = None
+
+            row = getattr(payload, 'candle', None)
             with Session(engine) as session:
-                row = session.exec(
-                    select(Candle)
-                    .where((Candle.symbol == sym) & (Candle.exchange_type == settings.EXCHANGE_TYPE) & (Candle.interval == settings.INTERVAL))  # type: ignore[attr-defined]
-                    .order_by(Candle.open_time.desc())  # type: ignore[attr-defined]
-                    .limit(1)
-                ).first()
+                if row is None:
+                    row = session.exec(
+                        select(Candle)
+                        .where((Candle.symbol == sym) & (Candle.exchange_type == settings.EXCHANGE_TYPE) & (Candle.interval == settings.INTERVAL))  # type: ignore[attr-defined]
+                        .order_by(Candle.open_time.desc())  # type: ignore[attr-defined]
+                        .limit(1)
+                    ).first()
                 if not row:
                     logging.info("predictor_loop %s no row yet", sym)
                 if row:
@@ -284,7 +304,12 @@ async def predictor_loop(sym: str) -> None:
                         pass
         except Exception as e:
             logging.exception("predictor_loop error [%s]: %s", sym, e)
-        await asyncio.sleep(interval)
+        # Event-driven predictions shouldn't sleep when fed by queue, but
+        # we keep a minimal idle sleep to yield control.
+        if payload is None:
+            await asyncio.sleep(interval)
+        else:
+            await asyncio.sleep(max(0.0, queue_idle_sleep))
 
 
 def _trades_snapshot(session: Session) -> Any:
@@ -812,6 +837,17 @@ async def startup() -> None:
         except Exception as e:
             logging.exception("Gap fill failed: %s", e)
 
+    # Attempt to restore sequence buffers from snapshot before DB seeding
+    restored_buffers = 0
+    seq_buffer_path = getattr(settings, "SEQ_BUFFER_STATE_PATH", "")
+    if seq_buffer_path:
+        try:
+            restored_buffers = load_buffers_from_path(seq_buffer_path)
+            if restored_buffers:
+                logging.info("Restored %d sequence buffers from %s", restored_buffers, seq_buffer_path)
+        except Exception as _sb:
+            logging.warning("Sequence buffer snapshot load skipped: %s", _sb)
+
     # Feature calculator seed (similar to FastAPI startup)
     try:
         with Session(engine) as session:
@@ -836,10 +872,12 @@ async def startup() -> None:
                     )
             # Seed sequence buffers with recent historical candles (up to SEQ_LEN)
             try:
-                from sqlalchemy import desc
                 from .models import Candle as _C
-                from .seq_buffer import get_buffer, extract_vector_from_candle
                 for sym in settings.SYMBOLS:
+                    buf = get_buffer(sym)
+                    if len(buf) > 0:
+                        logging.info("Sequence buffer for %s already populated (len=%d)", sym, len(buf))
+                        continue
                     rows = session.exec(
                         select(_C)
                         .where((_C.symbol == sym) & (_C.exchange_type == settings.EXCHANGE_TYPE) & (_C.interval == settings.INTERVAL))
@@ -921,6 +959,8 @@ async def startup() -> None:
 
 
 async def main() -> None:
+    global shutdown_event
+    shutdown_event = asyncio.Event()
     await startup()
     # 모델 아티팩트 변경 감시 태스크 시작
     try:
@@ -972,6 +1012,7 @@ async def main() -> None:
     # Graceful shutdown signal handlers
     try:
         loop = asyncio.get_running_loop()
+        assert shutdown_event is not None
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, shutdown_event.set)
         logging.info("Registered SIGTERM/SIGINT handlers for graceful shutdown")
@@ -979,6 +1020,7 @@ async def main() -> None:
         logging.warning("Signal handler registration failed; continuing without graceful shutdown handlers")
 
     async def shutdown_watcher():
+        assert shutdown_event is not None
         await shutdown_event.wait()
         logging.info("Shutdown signal received; broadcasting server_shutdown and closing clients")
         try:
@@ -1008,6 +1050,7 @@ async def main() -> None:
             ping_timeout,
         )
         try:
+            assert shutdown_event is not None
             while not shutdown_event.is_set():
                 await asyncio.sleep(3600)
         finally:
@@ -1038,6 +1081,14 @@ async def main() -> None:
                                 }, f)
             except Exception:
                 pass
+            # Persist sequence buffers snapshot
+            try:
+                seq_path = getattr(settings, 'SEQ_BUFFER_STATE_PATH', '')
+                if seq_path:
+                    saved = save_buffers_to_path(seq_path)
+                    logging.info("Sequence buffers saved to %s (symbols=%d)", seq_path, saved)
+            except Exception as _e:
+                logging.warning("Sequence buffer snapshot save failed: %s", _e)
             if not settings.DISABLE_BACKGROUND_LOOPS:
                 try:
                     await state.collector.stop()

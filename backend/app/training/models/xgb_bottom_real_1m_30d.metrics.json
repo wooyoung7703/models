@@ -1,26 +1,34 @@
 {
-  "model_out": "backend/app/training/models/xgb_bottom_real_1m_30d.pkl",
+  "model_out": "/app/backend/app/training/models/xgb_bottom_real_1m_30d.pkl",
   "mode": "cls_bottom",
   "interval": "1m",
+  "label_schema": {
+    "version": "bottom_v1",
+    "past_window": 15,
+    "future_window": 60,
+    "min_gap": 20,
+    "tolerance_pct": 0.004
+  },
   "n_features": 16,
-  "train_rows": 34498,
-  "val_rows": 8625,
+  "train_rows": 1176,
+  "val_rows": 295,
+  "test_rows": 0,
   "metrics": {
     "default_threshold": 0.5,
-    "precision": 0.46943231441048033,
-    "recall": 0.698051948051948,
-    "f1": 0.5613577023498695,
-    "tp": 430,
-    "fp": 486,
-    "fn": 186,
-    "best_threshold": 0.25,
-    "best_precision": 0.44397641112047176,
-    "best_recall": 0.8555194805194806,
-    "best_f1": 0.5845812534664447,
-    "best_tp": 527,
-    "best_fp": 660,
-    "best_fn": 89,
-    "best_iteration": 258
+    "precision": 0.35294117647058826,
+    "recall": 0.8,
+    "f1": 0.489795918367347,
+    "tp": 12,
+    "fp": 22,
+    "fn": 3,
+    "best_threshold": 0.44999999999999996,
+    "best_precision": 0.35135135135135137,
+    "best_recall": 0.8666666666666667,
+    "best_f1": 0.5000000000000001,
+    "best_tp": 13,
+    "best_fp": 24,
+    "best_fn": 2,
+    "best_iteration": 75
   },
   "params": {
     "objective": "binary:logistic",
@@ -31,7 +39,7 @@
     "min_child_weight": 1.0,
     "eval_metric": "logloss",
     "seed": 42,
-    "scale_pos_weight": 14.407771326485038
+    "scale_pos_weight": 15.333333333333334
   },
   "data_source": "real",
   "feature_list": [
@@ -52,5 +60,5 @@
     "body_pct_of_range",
     "vwap_20_dev"
   ],
-  "timestamp_utc": "2025-11-13T06:36:52Z"
+  "timestamp_utc": "2025-11-19T15:52:15Z"
 }

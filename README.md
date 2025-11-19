@@ -17,6 +17,16 @@ pip install -r backend/requirements.txt
 uvicorn backend.app.main:app --reload --port 8000
 ```
 
+## Configuration
+
+Copy `.env.example` to `.env` at the repo root to centralize runtime settings:
+
+```bash
+cp .env.example .env
+```
+
+Edit the file to toggle collector loops, model paths, or prediction intervals without touching code. The backend automatically loads the root `.env` first and then `backend/.env` (if present) so you can keep local overrides scoped to the backend folder. Run `pytest backend/tests/test_config.py` after changing defaults to ensure normalization logic (symbol casing, threshold precedence, retrain windows) still behaves as expected.
+
 Quick start (frontend):
 
 ```bash
@@ -61,6 +71,8 @@ docker compose logs -f backend
 docker compose logs -f frontend
 ```
 
+> **Tip:** Both `docker-compose.yml` and `docker-compose.dev.yml` load `.env` from the repo root (created from `.env.example`). Keep your runtime configuration in that file and Compose will inject the same values into the backend and trainer containers automatically.
+
 Open: `http://localhost:8080` (frontend will attempt `ws://<host>:8022` by default).
 
 Check container health (backend):
@@ -83,6 +95,8 @@ Set in `docker-compose.yml` under the `backend` service (or override with `docke
 - `STACKING_THRESHOLD` (force threshold override)
 - `LOG_LEVEL=INFO|DEBUG`
 - `WS_PORT` (default 8022; change mapping accordingly)
+- `TRADE_STRATEGY` (selects the trade plugin; `stacking` and `heuristic` are available)
+- `HEURISTIC_ENTRY_THRESHOLD` / `HEURISTIC_ADD_THRESHOLD` (tune entry/add gating when `TRADE_STRATEGY=heuristic`)
 
 To change exposed port:
 ```yaml

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/model_artifacts.schema.json",
+  "title": "Stacking Combiner Artifact",
+  "description": "Schema describing the JSON artifact consumed by backend.app.model_adapters.StackingCombiner",
+  "type": "object",
+  "required": [
+    "version",
+    "ensemble",
+    "model_order",
+    "coef",
+    "intercept"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Artifact schema version"
+    },
+    "ensemble": {
+      "type": "string",
+      "enum": ["logistic", "bayes", "mean"],
+      "description": "Ensemble method identifier"
+    },
+    "model_order": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Ordered list of base model names"
+    },
+    "coef": {
+      "type": "array",
+      "items": { "type": "number" },
+      "description": "Coefficients aligned with model_order"
+    },
+    "intercept": {
+      "type": "number",
+      "description": "Intercept term for logistic / linear combinations"
+    },
+    "threshold_default": {
+      "type": "number",
+      "description": "Optional fallback decision threshold"
+    },
+    "calibration": {
+      "type": "object",
+      "description": "Optional calibration metadata",
+      "properties": {
+        "method": { "type": "string" },
+        "params": { "type": "object" }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "description": "Arbitrary metadata, e.g., training stats"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ensemble": { "const": "logistic" } } },
+      "then": {
+        "properties": {
+          "coef": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}
