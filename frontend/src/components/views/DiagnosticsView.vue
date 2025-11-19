@@ -43,9 +43,49 @@
 
     <div class="grid">
       <article class="table-card">
-        <header>
-          <h3>Feature Freshness Inspector</h3>
-          <span class="muted">상위 {{ freshnessRows.length }}건</span>
+        <header class="card-head">
+          <div>
+            <h3>Feature Freshness Inspector</h3>
+            <span class="muted">총 {{ allFreshnessRows.length }} · 표시 {{ freshnessRows.length }}</span>
+          </div>
+          <div class="table-controls">
+            <input
+              v-model="filterSymbol"
+              type="text"
+              class="symbol-input"
+              placeholder="심볼 검색 (예: BTCUSDT)"
+            />
+            <div class="status-toggle">
+              <button
+                type="button"
+                :class="['chip', { active: filterStatus === 'all' }]"
+                @click="filterStatus = 'all'"
+              >
+                전체 {{ allFreshnessRows.length }}
+              </button>
+              <button
+                type="button"
+                :class="['chip', { active: filterStatus === 'healthy' }]"
+                @click="filterStatus = 'healthy'"
+              >
+                양호 {{ freshnessCounts.healthy }}
+              </button>
+              <button
+                type="button"
+                :class="['chip', { active: filterStatus === 'warn' }]"
+                @click="filterStatus = 'warn'"
+              >
+                주의 {{ freshnessCounts.warn }}
+              </button>
+              <button
+                type="button"
+                :class="['chip', { active: filterStatus === 'bad' }]"
+                @click="filterStatus = 'bad'"
+              >
+                경고 {{ freshnessCounts.bad }}
+              </button>
+            </div>
+          </div>
         </header>
         <table>
           <thead>
@@ -127,6 +167,8 @@ const props = defineProps<{
 const refreshing = ref(false)
 const reconnecting = ref(false)
 const disconnecting = ref(false)
+const filterSymbol = ref('')
+const filterStatus = ref<'all' | 'healthy' | 'warn' | 'bad'>('all')
 
 async function handleRefresh() {
   if (!props.manualRefresh) return
@@ -203,18 +245,44 @@ const nowcastSymbols = computed(() =>
   Object.keys(props.nowcasts || {}).filter((symbol) => !symbol.startsWith('_')).length
 )
 
-const freshnessRows = computed(() =>
+const allFreshnessRows = computed(() =>
   filteredSymbols.value
     .map((symbol) => buildFreshnessRow(symbol, props.features[symbol]))
     .sort((a, b) => (b.flagScore || 0) - (a.flagScore || 0))
-    .slice(0, 10)
 )
+
+const freshnessRows = computed(() => {
+  const needle = filterSymbol.value.trim().toUpperCase()
+  const statusFilter = filterStatus.value
+  return allFreshnessRows.value
+    .filter((row) => {
+      const matchesSymbol = needle ? row.symbol.toUpperCase().includes(needle) : true
+      const matchesStatus = statusFilter === 'all' ? true : row.statusKey === statusFilter
+      return matchesSymbol && matchesStatus
+    })
+    .slice(0, 10)
+})
+
+const freshnessCounts = computed(() => {
+  const counts: Record<'healthy' | 'warn' | 'bad', number> = {
+    healthy: 0,
+    warn: 0,
+    bad: 0,
+  }
+  allFreshnessRows.value.forEach((row) => {
+    if (row.statusKey === 'healthy') counts.healthy += 1
+    else if (row.statusKey === 'bad') counts.bad += 1
+    else counts.warn += 1
+  })
+  return counts
+})
 
 function buildFreshnessRow(symbol: string, snapshot: FeatureSnapshot | undefined) {
   const freshSeconds = typeof snapshot?.data_fresh_seconds === 'number' ? snapshot.data_fresh_seconds : null
   const missingMinutes = typeof snapshot?.missing_minutes_24h === 'number' ? snapshot.missing_minutes_24h : null
   const status = String(snapshot?.status || (freshSeconds != null && freshSeconds < 900 ? 'ok' : 'warn'))
   const flagScore = (freshSeconds || 0) + (missingMinutes || 0)
+  const statusClass = status === 'ok' ? 'ok' : status === 'error' ? 'bad' : 'warn'
   return {
     symbol,
     interval: snapshot?.interval || snapshot?.bucket || '-',
@@ -222,7 +290,8 @@ function buildFreshnessRow(symbol: string, snapshot: FeatureSnapshot | undefined
     missingMinutes,
     latest15m: snapshot?.['15m_latest_open_time'] || snapshot?.['5m_latest_open_time'] || snapshot?.latest_open_time,
     statusLabel: status.toUpperCase(),
-    statusClass: status === 'ok' ? 'ok' : status === 'error' ? 'bad' : 'warn',
+    statusClass,
+    statusKey: statusClass === 'ok' ? 'healthy' : statusClass === 'bad' ? 'bad' : 'warn',
     freshLabel: formatNumber(freshSeconds, 's'),
     missingLabel: formatNumber(missingMinutes, 'm'),
     flagScore,
@@ -310,6 +379,52 @@ function formatNumber(value: number | null, unit: 's' | 'm') {
   background: rgba(6, 10, 20, 0.92);
 }
 
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.table-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  align-items: flex-end;
+}
+
+.symbol-input {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 10px;
+  padding: 0.35rem 0.6rem;
+  color: inherit;
+  min-width: 200px;
+}
+
+.status-toggle {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chip {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 0.2rem 0.75rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.chip.active {
+  border-color: rgba(96, 165, 250, 0.6);
+  color: #93c5fd;
+}
+
 .table-card table {
   width: 100%;
   border-collapse: collapse;
@@ -366,6 +481,15 @@ td {
 @media (max-width: 960px) {
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .table-controls {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .status-toggle {
+    justify-content: flex-start;
   }
 }
 </style>
