@@ -255,6 +255,7 @@ export interface UseRealtimeHandle {
   entryMetrics: Ref<EntryMetrics | null>
   notifications: Ref<UiNotification[]>
   adminAck: Ref<string>
+  pollIntervalSeconds: Ref<number>
 
   // lifecycle helpers
   start: () => Promise<void>
@@ -263,6 +264,7 @@ export interface UseRealtimeHandle {
   disconnectWs: () => Promise<void>
   manualRefresh: () => Promise<void>
   sendAdminCommand: (action: string, token?: string) => Promise<void>
+  setPollIntervalSeconds: (value: number) => void
 }
 
 // Vue's Ref type import helper (allows tree-shaking when used outside of *.vue files)

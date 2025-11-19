@@ -29,6 +29,23 @@
 
     <main class="app-main">
       <section v-if="activeTab === 'monitoring'" class="panel-stack">
+        <div class="panel panel-transparent">
+          <SystemHealthStrip
+            :ws-connected="wsConnected"
+            :ws-attempts="wsAttempts"
+            :last-updated="lastUpdated"
+            :healthy-symbols="healthySymbols"
+            :total-symbols="totalSymbols"
+            :trainer-meta="trainerMeta"
+            :entry-win-rate="entryWinRate"
+            :entry-samples="entrySamples"
+          />
+        </div>
+
+        <div class="panel meta-panel">
+          <StackingMetaCard :meta="stackingMeta" />
+          <EntryMetaCard :entry-metrics="entryMeta" />
+        </div>
         <div class="panel primary">
           <header>
             <h2>시세 감시</h2>
@@ -54,6 +71,14 @@
           </div>
         </div>
 
+        <div class="panel poll-panel">
+          <PollingIntervalControl
+            :value="pollIntervalSeconds"
+            :ws-connected="wsConnected"
+            @update:value="handlePollIntervalChange"
+          />
+        </div>
+
         <div class="panel grid-two">
           <TradeSignalPanel
             :latest="latestTrade"
@@ -70,6 +95,7 @@
             :selected-symbol="chartSymbol"
             @inspect="handleInspectSymbol"
           />
+          <p class="muted chart-interval-hint">차트 간격 · {{ chartInterval }}</p>
         </div>
       </section>
 
@@ -82,6 +108,7 @@
         :chart-nowcast="chartNowcast"
         :ws-connected="wsConnected"
         @update:chart-symbol="(value) => (chartSymbol = value)"
+        @interval-change="handleChartInterval"
       />
 
       <TradesView v-else-if="activeTab === 'trades'" :trades="trades" />
@@ -152,6 +179,14 @@ import NotificationCenter from './components/NotificationCenter.vue'
 // @ts-ignore script-setup default export shim
 import TopSignalsPanel from './components/TopSignalsPanel.vue'
 // @ts-ignore script-setup default export shim
+import PollingIntervalControl from './components/PollingIntervalControl.vue'
+// @ts-ignore script-setup default export shim
+import SystemHealthStrip from './components/SystemHealthStrip.vue'
+// @ts-ignore script-setup default export shim
+import StackingMetaCard from './components/StackingMetaCard.vue'
+// @ts-ignore script-setup default export shim
+import EntryMetaCard from './components/EntryMetaCard.vue'
+// @ts-ignore script-setup default export shim
 import ChartView from './components/views/ChartView.vue'
 // @ts-ignore script-setup default export shim
 import TradesView from './components/views/TradesView.vue'
@@ -196,10 +231,12 @@ const {
   entryMetrics,
   notifications,
   adminAck,
+  pollIntervalSeconds,
   manualRefresh,
   sendAdminCommand,
   connectWs,
   disconnectWs,
+  setPollIntervalSeconds,
 } = useRealtimeData({ autoStart: true })
 
 const activeLabel = computed(() => tabs.find((tab) => tab.id === activeTab.value)?.label || '')
@@ -228,8 +265,10 @@ const topNowcasts = computed<DerivedNowcast[]>(() =>
 const activeTrades = computed<TradeRow[]>(() => trades.value.slice(0, 5))
 const latestTrade = computed(() => trades.value[0] || null)
 const openTrades = computed(() => trades.value.filter((row) => row.status === 'open'))
-const chartSymbol = ref('')
+const chartSymbolStorageKey = 'chart.symbol'
+const chartSymbol = ref(getStoredChartSymbol())
 const chartSignalLimit = 40
+const chartInterval = ref('1m')
 const chartNowcast = computed(() => (chartSymbol.value ? nowcasts.value[chartSymbol.value] || null : null))
 const chartSignals = computed<ChartSignal[]>(() => {
   const symbol = chartSymbol.value
@@ -247,7 +286,7 @@ const chartSignals = computed<ChartSignal[]>(() => {
       const marker = tradeToChartSignal(trade)
       if (marker) derived.push(marker)
     })
-  return derived.slice(-chartSignalLimit)
+  return sortSignalsByTime(derived).slice(-chartSignalLimit)
 })
 const recentNotifications = computed(() => notifications.value.slice(0, 4))
 const trayNotifications = computed(() => notifications.value.slice(0, 6))
@@ -267,6 +306,8 @@ const trainingProgress = computed(() => {
   }
   return 'idle'
 })
+const entryWinRate = computed(() => entryMetrics.value?.overall?.win_rate ?? null)
+const entrySamples = computed(() => entryMetrics.value?.overall?.samples ?? null)
 const timeAgo = computed(() => {
   if (!lastUpdated.value) return '미수신'
   const delta = Date.now() - lastUpdated.value.getTime()
@@ -282,6 +323,11 @@ const trainerHeartbeatLabel = computed(() => {
   const ageLabel = typeof age === 'number' ? `${Math.round(age / 60)}m ago` : 'n/a'
   return healthy ? `Trainer heartbeat · ${ageLabel}` : `Trainer stale · ${ageLabel}`
 })
+const stackingMeta = computed(() => {
+  const meta = nowcasts.value['_stacking_meta']
+  return meta && typeof meta === 'object' ? (meta as Record<string, any>) : null
+})
+const entryMeta = computed(() => entryMetrics.value)
 
 watch(
   visibleSymbols,
@@ -296,6 +342,15 @@ watch(
   },
   { immediate: true }
 )
+
+watch(chartSymbol, (symbol) => {
+  if (typeof window === 'undefined') return
+  if (!symbol) {
+    window.localStorage?.removeItem(chartSymbolStorageKey)
+    return
+  }
+  window.localStorage?.setItem(chartSymbolStorageKey, symbol)
+})
 
 function deriveNowcast(symbol: string, payload: NowcastEntry | undefined): DerivedNowcast {
   if (!payload) return { symbol, score: 0, posture: 'pending' }
@@ -317,6 +372,14 @@ function handleInspectSymbol(symbol: string) {
   if (!symbol) return
   chartSymbol.value = symbol
   activeTab.value = 'chart'
+}
+
+function handleChartInterval(value: string) {
+  chartInterval.value = value
+}
+
+function handlePollIntervalChange(value: number) {
+  setPollIntervalSeconds(value)
 }
 
 function normalizeChartSignal(
@@ -358,6 +421,24 @@ function tradeToChartSignal(trade: TradeRow): ChartSignal | null {
     side,
     price: trade.entry_price,
     label: trade.status === 'closed' ? 'exit' : 'entry',
+  }
+}
+
+function sortSignalsByTime(signals: ChartSignal[]) {
+  return [...signals].sort((a, b) => signalTimestamp(a) - signalTimestamp(b))
+}
+
+function signalTimestamp(entry: ChartSignal) {
+  const value = Date.parse(entry.ts)
+  return Number.isNaN(value) ? 0 : value
+}
+
+function getStoredChartSymbol() {
+  if (typeof window === 'undefined') return ''
+  try {
+    return window.localStorage?.getItem(chartSymbolStorageKey) || ''
+  } catch {
+    return ''
   }
 }
 </script>
@@ -462,6 +543,17 @@ function tradeToChartSignal(trade: TradeRow): ChartSignal | null {
   background: transparent;
   border: none;
   padding: 0;
+}
+
+.meta-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.chart-interval-hint {
+  margin-top: 8px;
+  font-size: 0.8rem;
 }
 
 .panel.primary {

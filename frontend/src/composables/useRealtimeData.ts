@@ -66,7 +66,7 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
   let started = false
   let destroying = false
   let queueIdleSleep = Math.max(0.05, options.featuresIntervalSeconds ?? 0.05)
-  let pollIntervalSeconds = Math.max(5, options.pollIntervalSeconds ?? 10)
+  const pollIntervalSeconds = ref(Math.max(5, options.pollIntervalSeconds ?? 10))
   let tradesIntervalSeconds = Math.max(15, options.tradesIntervalSeconds ?? 45)
   let featuresIntervalSeconds = Math.max(30, options.featuresIntervalSeconds ?? 45)
   let trainingIntervalSeconds = Math.max(45, options.trainingStatusIntervalSeconds ?? 60)
@@ -318,7 +318,7 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
     startNowcast() {
       if (options.wsOnly) return
       if (pollers.nowcast) clearInterval(pollers.nowcast)
-      pollers.nowcast = setInterval(fetchNowcast, pollIntervalSeconds * 1000)
+      pollers.nowcast = setInterval(fetchNowcast, pollIntervalSeconds.value * 1000)
     },
     startTrades() {
       if (options.wsOnly) return
@@ -354,6 +354,16 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
 
   function stopPollingLoops() {
     pollControls.stopAll()
+  }
+
+  function setPollIntervalSeconds(nextSeconds: number) {
+    const clamped = Math.max(5, Math.min(180, Math.round(nextSeconds)))
+    if (pollIntervalSeconds.value === clamped) return
+    pollIntervalSeconds.value = clamped
+    if (options.wsOnly) return
+    if (pollers.nowcast) {
+      pollControls.startNowcast()
+    }
   }
 
   async function autoDetectApiBase() {
@@ -445,6 +455,8 @@ export function useRealtimeData(options: UseRealtimeOptions = {}): UseRealtimeHa
     entryMetrics,
     notifications,
     adminAck,
+    pollIntervalSeconds,
+    setPollIntervalSeconds,
     start,
     stop,
     connectWs,
